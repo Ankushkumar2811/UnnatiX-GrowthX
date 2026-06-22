@@ -1,0 +1,170 @@
+{
+  "app_name": "UnnatiX GrowthX",
+  "personality": "7 Dark-First Utility with 6 Glass / Luxe surfaces",
+  "personality_one_liner": "A high-performance, premium AI command center built for speed, orchestration, and executive control.",
+  "color": {
+    "surface": "#0C0C0C",
+    "onSurface": "#F5F5F5",
+    "surfaceSecondary": "#161616",
+    "onSurfaceSecondary": "#D4D4D4",
+    "surfaceTertiary": "#222222",
+    "onSurfaceTertiary": "#A3A3A3",
+    "surfaceInverse": "#EEEEEE",
+    "onSurfaceInverse": "#0C0C0C",
+    "brand": "#FF4400",
+    "brandPrimary": "#FF4400",
+    "onBrandPrimary": "#FFFFFF",
+    "brandSecondary": "#FF7300",
+    "onBrandSecondary": "#FFFFFF",
+    "brandTertiary": "#3B1605",
+    "onBrandTertiary": "#FF884D",
+    "success": "#00E676",
+    "onSuccess": "#00331A",
+    "warning": "#FFC400",
+    "onWarning": "#332700",
+    "error": "#FF1744",
+    "onError": "#4D0012",
+    "info": "#00E5FF",
+    "onInfo": "#003339",
+    "border": "#2A2A2A",
+    "borderStrong": "#444444",
+    "divider": "#1F1F1F"
+  },
+  "typography": {
+    "displayFontFamily": "Rajdhani",
+    "textFontFamily": "IBM Plex Sans",
+    "scale": {
+      "sm": 12,
+      "base": 14,
+      "lg": 16,
+      "xl": 20,
+      "2xl": 24
+    }
+  },
+  "spacing": {
+    "rule": "Generous intentional padding around metrics and cards to separate dense data points. Use consistent gaps for grids and stacks.",
+    "xs": 4,
+    "sm": 8,
+    "md": 12,
+    "lg": 16,
+    "xl": 24,
+    "2xl": 32,
+    "3xl": 48
+  },
+  "radius_tokens": {
+    "sm": 4,
+    "md": 8,
+    "lg": 16,
+    "pill": 999
+  },
+  "shadow_tier": "0",
+  "navigation": "bottom_tabs",
+  "icon_set": "Phosphor",
+  "glassmorphism": {
+    "enabled": "true",
+    "do's": [
+      "Use glass effect on sticky bottom tab bar",
+      "Apply glass blur to hero/dashboard featured metric cards",
+      "Use glass for floating action buttons or approval bottom sheets",
+      "Pair blur with dark tinted base (≥75% opacity) to maintain high contrast"
+    ],
+    "dont's": [
+      "Never blur dense task list items or form inputs",
+      "Do not use glass for text containers or standard buttons",
+      "Avoid stacking multiple blurred layers"
+    ]
+  },
+  "platform_libraries": {
+    "glass": {
+      "ios": "expo-glass-effect",
+      "android": "expo-blur",
+      "low_end_android_fallback": "solid surfaceSecondary"
+    },
+    "image": "expo-image",
+    "blur": "expo-blur",
+    "bottom_sheet": "@gorhom/bottom-sheet",
+    "animation": "react-native-reanimated",
+    "gesture": "react-native-gesture-handler"
+  },
+  "screens": [
+    {
+      "name": "Dashboard",
+      "purpose": "A live operational overview of company performance, AI agent metrics, and system status.",
+      "states": {
+        "loading": "Central high-tech spinner with blurred background",
+        "empty": "Illustration of idle command center, prompt to launch a goal",
+        "error": "Red error text over surfaceSecondary block, Retry connection button"
+      },
+      "layout": "Hero section uses a wide glass-blurred card overlaying a subtle textured image. Key KPI metrics (Total Agents, Projects) stack vertically or in a 2-col wrap grid. Recent activity feed sits below with tight spacing."
+    },
+    {
+      "name": "CEO Orchestration",
+      "purpose": "Central command to input high-level objectives and observe AI breakdown, workflow execution, and final summary.",
+      "states": {
+        "loading": "Skeleton graph nodes and glowing lines indicating processing",
+        "empty": "Large text input for business objective, floating action button to 'Synthesize Plan'",
+        "error": "Error block indicating agent breakdown failure, Edit Objective button"
+      },
+      "layout": "Top half is a focused input area. Upon submission, it collapses to a sticky header and reveals a multi-step vertical progress timeline (the 'workflow graph') showing which agent is handling which subtask. Progress bars and status badges update dynamically."
+    },
+    {
+      "name": "Agent Cards",
+      "purpose": "Grid view of all AI employees displaying their real-time status, performance score, and current task.",
+      "states": {
+        "loading": "Skeleton cards with pulsating avatar slots",
+        "empty": "No agents active, prompt to initialize workforce",
+        "error": "Agent registry failed to load, reload button"
+      },
+      "layout": "2-column wrapped grid. Each card features an abstract 3D shape as the agent's avatar, pulse indicator (active/idle), name, role, and a condensed current task label."
+    },
+    {
+      "name": "Task System",
+      "purpose": "Detailed breakdown of all active, pending, and completed tasks across departments with dependencies.",
+      "states": {
+        "loading": "Skeleton list items",
+        "empty": "Empty state illustration with text 'All tasks complete'",
+        "error": "Error fetching tasks, tap to retry"
+      },
+      "layout": "Vertical list layout with sticky filter/segment controls (Pending | Running | Completed). Each list row includes priority badge, agent assignee, task name, and a progress bar."
+    },
+    {
+      "name": "Approval Queue",
+      "purpose": "Dedicated space for reviewing and approving sensitive actions flagged by AI agents.",
+      "states": {
+        "loading": "Spinner centered",
+        "empty": "Success icon, 'Zero pending approvals'",
+        "error": "Error loading approvals, retry"
+      },
+      "layout": "Full-width cards detailing the proposed action, impact, and requesting agent. Large side-by-side CTA buttons (Approve/Reject) or a swipe-to-approve gesture using Reanimated."
+    }
+  ],
+  "images": {
+    "dashboard_hero_bg": {
+      "url": "https://images.unsplash.com/photo-1666555038185-8323c553de64?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjAzMjh8MHwxfHNlYXJjaHwxfHxkYXJrJTIwbWV0YWxsaWMlMjB0ZXh0dXJlfGVufDB8fHx8MTc4MjEwMDA5N3ww&ixlib=rb-4.1.0&q=85",
+      "alt": "Dark metallic industrial texture background"
+    },
+    "agent_avatar_1": {
+      "url": "https://images.pexels.com/photos/29450016/pexels-photo-29450016.jpeg?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940",
+      "alt": "Luminous 3D geometric shape for Marketing agent avatar"
+    },
+    "agent_avatar_2": {
+      "url": "https://images.unsplash.com/photo-1710438399422-2fca27686bcd?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA4Mzl8MHwxfHNlYXJjaHwxfHxkYXJrJTIwYWJzdHJhY3QlMjAzRCUyMHNoYXBlfGVufDB8fHx8MTc4MjEwMDA5Mnww&ixlib=rb-4.1.0&q=85",
+      "alt": "Abstract wavy lines for Developer agent avatar"
+    },
+    "agent_avatar_3": {
+      "url": "https://images.pexels.com/photos/31650385/pexels-photo-31650385.jpeg?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940",
+      "alt": "Abstract metallic spiral for Finance agent avatar"
+    }
+  },
+  "instructions_to_main_agent": [
+    "Strictly follow the Dark-First Utility guidelines. Avoid pure black backgrounds; stick to the surface hex values provided.",
+    "Implement glassmorphism selectively on hero cards and floating elements using expo-blur. Always place a dark tint under the blur for text readability.",
+    "Do NOT use any blues, purples, or indigo hues. The accent is purely Ember/Signal Orange (#FF4400) alongside success/warning colors.",
+    "For the CEO orchestration screen, ensure the workflow graph/timeline feels highly mechanical and precise with glowing progress indicators.",
+    "Implement tactile haptics on status toggles, approval buttons, and tab switches.",
+    "Use Phosphor icons with consistent weights. No emojis anywhere.",
+    "Ensure the Task System list has high information density but remains highly scannable, grouping priority and status clearly.",
+    "Ensure all text layered over the dashboard hero background image uses a linear-gradient scrim (top to bottom) so it remains legible.",
+    "Agent cards should use the abstract 3D images provided for avatars, not generic initials, to maintain the premium AI OS feel."
+  ]
+}
