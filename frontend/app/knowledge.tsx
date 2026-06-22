@@ -3,6 +3,7 @@ import { View, Text, StyleSheet, ScrollView, TextInput, Pressable, KeyboardAvoid
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter, useFocusEffect } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
+import * as DocumentPicker from 'expo-document-picker';
 import { theme } from '@/src/theme';
 import { api } from '@/src/api';
 
@@ -34,6 +35,36 @@ export default function KnowledgeBase() {
     try { await api(`/knowledge/${id}`, { method: 'DELETE' }); load(); } catch {}
   };
 
+  const upload = async () => {
+    try {
+      const res = await DocumentPicker.getDocumentAsync({
+        type: ['application/pdf', 'text/csv', 'text/plain'],
+        copyToCacheDirectory: true,
+        multiple: false,
+      });
+      if (res.canceled || !res.assets?.[0]) return;
+      const asset = res.assets[0];
+      setBusy(true);
+      // Fetch as blob → base64
+      const fetched = await fetch(asset.uri);
+      const blob = await fetched.blob();
+      const reader = new FileReader();
+      const b64: string = await new Promise((resolve, reject) => {
+        reader.onloadend = () => resolve((reader.result as string).split(',')[1] || '');
+        reader.onerror = reject;
+        reader.readAsDataURL(blob);
+      });
+      const mime = asset.mimeType || 'text/plain';
+      await api('/knowledge/upload', { method: 'POST', body: {
+        title: asset.name || 'Uploaded file',
+        mime,
+        file_b64: b64,
+      }});
+      await load();
+    } catch (e: any) { console.warn('Upload failed', e); }
+    finally { setBusy(false); }
+  };
+
   return (
     <SafeAreaView style={s.safe} edges={['top']}>
       <View style={s.header}>
@@ -58,6 +89,11 @@ export default function KnowledgeBase() {
               placeholderTextColor={theme.color.onSurfaceTertiary} value={content} onChangeText={setContent} />
             <Pressable testID="knowledge-submit-button" disabled={busy} onPress={add} style={[s.cta, busy && { opacity: 0.6 }]}>
               {busy ? <ActivityIndicator color="#fff" /> : <><Ionicons name="bookmark" size={16} color="#fff" /><Text style={s.ctaText}>Save to knowledge base</Text></>}
+            </Pressable>
+
+            <Pressable testID="knowledge-upload-button" disabled={busy} onPress={upload} style={[s.uploadCta, busy && { opacity: 0.6 }]}>
+              <Ionicons name="cloud-upload-outline" size={16} color={theme.color.brand} />
+              <Text style={s.uploadText}>Or upload PDF / CSV / TXT</Text>
             </Pressable>
           </View>
 
@@ -97,6 +133,8 @@ const s = StyleSheet.create({
   input: { backgroundColor: theme.color.surfaceTertiary, borderWidth: 1, borderColor: theme.color.border, color: theme.color.onSurface, padding: 12, borderRadius: theme.radius.sm, fontSize: 14, marginBottom: theme.spacing.sm },
   cta: { backgroundColor: theme.color.brand, paddingVertical: 14, borderRadius: theme.radius.md, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, marginTop: theme.spacing.sm },
   ctaText: { color: '#fff', fontWeight: '700', letterSpacing: 0.4 },
+  uploadCta: { marginTop: theme.spacing.sm, paddingVertical: 12, borderRadius: theme.radius.md, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, borderWidth: 1, borderColor: theme.color.brand + '66', backgroundColor: theme.color.brand + '10' },
+  uploadText: { color: theme.color.brand, fontWeight: '700', fontSize: 13, letterSpacing: 0.3 },
   empty: { color: theme.color.onSurfaceTertiary, fontSize: 13, textAlign: 'center', paddingVertical: theme.spacing.xl },
   item: { backgroundColor: theme.color.surfaceSecondary, borderWidth: 1, borderColor: theme.color.border, borderRadius: theme.radius.md, padding: theme.spacing.md, marginBottom: theme.spacing.sm },
   itemHead: { flexDirection: 'row', alignItems: 'center', gap: 8 },

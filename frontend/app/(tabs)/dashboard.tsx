@@ -77,14 +77,38 @@ export default function Dashboard() {
         <View style={s.quickRow}>
           <Pressable testID="dashboard-knowledge-link" onPress={() => router.push('/knowledge' as any)} style={s.quickTile}>
             <Ionicons name="library" size={18} color={theme.color.brand} />
-            <Text style={s.quickTitle}>Knowledge Base</Text>
-            <Text style={s.quickSub}>Feed business context to every agent</Text>
+            <Text style={s.quickTitle}>Knowledge</Text>
+            <Text style={s.quickSub}>Notes + PDF/CSV</Text>
           </Pressable>
           <Pressable testID="dashboard-integrations-link" onPress={() => router.push('/integrations' as any)} style={s.quickTile}>
             <Ionicons name="link" size={18} color={theme.color.brand} />
             <Text style={s.quickTitle}>Integrations</Text>
-            <Text style={s.quickSub}>Gmail · Slack · HubSpot · more</Text>
+            <Text style={s.quickSub}>Gmail · Slack · more</Text>
           </Pressable>
+        </View>
+        <View style={[s.quickRow, { marginTop: 10 }]}>
+          <Pressable testID="dashboard-meetings-link" onPress={() => router.push('/meetings' as any)} style={s.quickTile}>
+            <Ionicons name="videocam" size={18} color={theme.color.brand} />
+            <Text style={s.quickTitle}>Meetings</Text>
+            <Text style={s.quickSub}>Google Meet · calls</Text>
+          </Pressable>
+          <Pressable testID="dashboard-automations-link" onPress={() => router.push('/automations' as any)} style={s.quickTile}>
+            <Ionicons name="git-network" size={18} color={theme.color.brand} />
+            <Text style={s.quickTitle}>Automations</Text>
+            <Text style={s.quickSub}>Trigger → action</Text>
+          </Pressable>
+        </View>
+        <View style={[s.quickRow, { marginTop: 10 }]}>
+          <Pressable testID="dashboard-admin-link" onPress={() => router.push('/admin' as any)} style={s.quickTile}>
+            <Ionicons name="shield" size={18} color={theme.color.brand} />
+            <Text style={s.quickTitle}>Admin</Text>
+            <Text style={s.quickSub}>Team · invites · billing</Text>
+          </Pressable>
+          <View style={[s.quickTile, { opacity: 0.5 }]}>
+            <Ionicons name="trending-up" size={18} color={theme.color.onSurfaceTertiary} />
+            <Text style={s.quickTitle}>Analytics</Text>
+            <Text style={s.quickSub}>Coming soon</Text>
+          </View>
         </View>
 
         <Text style={s.section}>LIVE ACTIVITY FEED</Text>

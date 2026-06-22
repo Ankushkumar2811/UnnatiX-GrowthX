@@ -242,6 +242,37 @@ class IntegrationToggleIn(BaseModel):
     enabled: bool
 
 
+class KnowledgeFileIn(BaseModel):
+    title: str = Field(min_length=1, max_length=140)
+    mime: str
+    file_b64: str  # base64-encoded file bytes
+
+
+class MeetingIn(BaseModel):
+    title: str = Field(min_length=2, max_length=140)
+    participants: List[str] = Field(default_factory=list)
+    start_time: datetime
+    duration_min: int = Field(default=30, ge=10, le=480)
+    description: str = ""
+    requires_approval: bool = False
+
+
+class AutomationIn(BaseModel):
+    name: str = Field(min_length=2, max_length=80)
+    trigger: Literal["goal_created", "goal_completed", "approval_approved", "task_completed", "knowledge_added"]
+    action: Literal["create_task", "add_knowledge_note", "log_only"]
+    action_config: dict = Field(default_factory=dict)
+    enabled: bool = True
+
+
+class OrgInviteJoinIn(BaseModel):
+    code: str = Field(min_length=4, max_length=12)
+
+
+class OrgMemberRoleIn(BaseModel):
+    role: Literal["owner", "admin", "member"]
+
+
 # ============================================================
 # AUTH HELPERS
 # ============================================================
@@ -534,6 +565,7 @@ async def create_goal(body: GoalIn, user: dict = Depends(current_user)):
             await log_activity(user["id"], "ceo", f"Approval requested for: {t['title']}", "approval")
 
     await log_activity(user["id"], "ceo", f"Plan ready — {len(tasks)} tasks across {len({t.agent_id for t in tasks})} departments", "info")
+    await fire_automations(user["id"], "goal_created", {"goal_id": goal_id, "objective": body.objective})
 
     return GoalOut(
         id=goal_id, user_id=user["id"], objective=body.objective,
@@ -575,6 +607,8 @@ async def update_task(task_id: str, body: TaskStatusIn, user: dict = Depends(cur
         {"id": task_id},
         {"$set": {"status": body.status, "progress": progress, "updated_at": datetime.now(timezone.utc)}},
     )
+    if body.status == "completed":
+        await fire_automations(user["id"], "task_completed", {"task_id": task_id})
     return {"ok": True}
 
 
@@ -603,6 +637,8 @@ async def decide_approval(approval_id: str, body: ApprovalDecisionIn, user: dict
     )
     verb = "approved" if body.decision == "approved" else "rejected"
     await log_activity(user["id"], appr["agent_id"], f"Founder {verb}: {appr['action']}", "approval")
+    if body.decision == "approved":
+        await fire_automations(user["id"], "approval_approved", {"approval_id": approval_id, "task_id": appr["task_id"]})
     return {"ok": True}
 
 
@@ -769,6 +805,7 @@ async def create_knowledge(body: KnowledgeIn, user: dict = Depends(current_user)
     await db.knowledge.insert_one(doc)
     doc.pop("_id", None)
     await log_activity(user["id"], "hr", f"Sage indexed knowledge: {body.title}", "info")
+    await fire_automations(user["id"], "knowledge_added", {"knowledge_id": doc["id"]})
     return doc
 
 
@@ -822,6 +859,305 @@ async def toggle_integration(provider: str, body: IntegrationToggleIn, user: dic
     action = "connected (sandbox)" if body.enabled else "disconnected"
     await log_activity(user["id"], "ceo", f"{name} {action}", "integration")
     return {"id": provider, "status": status_value}
+
+
+# ============================================================
+# ROUTES: KNOWLEDGE FILE UPLOAD (PDF/CSV/TXT)
+# ============================================================
+def _extract_text(mime: str, raw: bytes) -> str:
+    import base64, io, csv
+    try:
+        if mime == "application/pdf":
+            from pypdf import PdfReader
+            reader = PdfReader(io.BytesIO(raw))
+            return "\n\n".join((p.extract_text() or "") for p in reader.pages)[:20000]
+        if mime == "text/csv":
+            text = raw.decode("utf-8", errors="ignore")
+            rows = list(csv.reader(io.StringIO(text)))
+            return "\n".join(" | ".join(r) for r in rows[:100])[:20000]
+        return raw.decode("utf-8", errors="ignore")[:20000]
+    except Exception as e:
+        logger.warning(f"Extract failed: {e}")
+        return ""
+
+
+@api.post("/knowledge/upload")
+async def upload_knowledge_file(body: KnowledgeFileIn, user: dict = Depends(current_user)):
+    import base64
+    try:
+        raw = base64.b64decode(body.file_b64)
+    except Exception:
+        raise HTTPException(400, "Invalid base64")
+    if len(raw) > 4 * 1024 * 1024:
+        raise HTTPException(413, "File too large (max 4MB)")
+    if body.mime not in ("application/pdf", "text/csv", "text/plain"):
+        raise HTTPException(400, "Unsupported mime; allowed: pdf, csv, txt")
+
+    content = _extract_text(body.mime, raw)
+    if not content.strip():
+        raise HTTPException(422, "Could not extract text from file")
+
+    doc = {
+        "id": str(uuid.uuid4()),
+        "user_id": user["id"],
+        "kind": "file",
+        "title": body.title,
+        "content": content,
+        "mime": body.mime,
+        "byte_size": len(raw),
+        "created_at": datetime.now(timezone.utc),
+    }
+    await db.knowledge.insert_one(doc)
+    doc.pop("_id", None)
+    await log_activity(user["id"], "hr", f"Sage indexed file: {body.title} ({body.mime})", "info")
+    return doc
+
+
+# ============================================================
+# ROUTES: MEETINGS (Google Meet — SANDBOX mode)
+# ============================================================
+def _sandbox_meet_link() -> str:
+    import secrets, string
+    alpha = string.ascii_lowercase
+    chunk = lambda n: "".join(secrets.choice(alpha) for _ in range(n))
+    return f"https://meet.google.com/{chunk(3)}-{chunk(4)}-{chunk(3)}"
+
+
+@api.post("/meetings")
+async def create_meeting(body: MeetingIn, user: dict = Depends(current_user)):
+    now = datetime.now(timezone.utc)
+    link = _sandbox_meet_link()
+    doc = {
+        "id": str(uuid.uuid4()),
+        "user_id": user["id"],
+        "title": body.title,
+        "participants": body.participants,
+        "start_time": body.start_time,
+        "duration_min": body.duration_min,
+        "description": body.description,
+        "meet_link": link,
+        "provider": "google_meet_sandbox",
+        "status": "pending_approval" if body.requires_approval else "scheduled",
+        "created_at": now,
+    }
+    await db.meetings.insert_one(doc)
+    doc.pop("_id", None)
+
+    if body.requires_approval:
+        appr = {
+            "id": str(uuid.uuid4()), "user_id": user["id"],
+            "task_id": doc["id"], "agent_id": "operations",
+            "action": f"Send invites for: {body.title}",
+            "impact": "Will send meeting invites to participants once approved.",
+            "payload_preview": f"Participants: {', '.join(body.participants) or '—'}\nWhen: {body.start_time.isoformat()}\nLink: {link}",
+            "status": "pending", "created_at": now,
+        }
+        await db.approvals.insert_one(appr)
+
+    await log_activity(user["id"], "operations", f"Orion scheduled: {body.title}", "meeting")
+    return doc
+
+
+@api.get("/meetings")
+async def list_meetings(user: dict = Depends(current_user)):
+    items = await db.meetings.find({"user_id": user["id"]}, {"_id": 0}).sort("start_time", 1).to_list(100)
+    return items
+
+
+@api.delete("/meetings/{mid}")
+async def cancel_meeting(mid: str, user: dict = Depends(current_user)):
+    res = await db.meetings.update_one(
+        {"id": mid, "user_id": user["id"]},
+        {"$set": {"status": "cancelled"}},
+    )
+    if res.matched_count == 0:
+        raise HTTPException(404, "Meeting not found")
+    return {"ok": True}
+
+
+# ============================================================
+# ROUTES: AUTOMATIONS
+# ============================================================
+AUTOMATION_TRIGGERS = {
+    "goal_created": "When CEO accepts a new goal",
+    "goal_completed": "When all tasks of a goal complete",
+    "approval_approved": "When founder approves an action",
+    "task_completed": "When any task completes",
+    "knowledge_added": "When a knowledge item is added",
+}
+AUTOMATION_ACTIONS = {
+    "create_task": "Assign a follow-up task to an agent",
+    "add_knowledge_note": "Append a note to the knowledge base",
+    "log_only": "Just log to activity feed (for testing)",
+}
+
+
+@api.get("/automations/catalog")
+async def automation_catalog(user: dict = Depends(current_user)):
+    return {"triggers": AUTOMATION_TRIGGERS, "actions": AUTOMATION_ACTIONS}
+
+
+@api.get("/automations")
+async def list_automations(user: dict = Depends(current_user)):
+    items = await db.automations.find({"user_id": user["id"]}, {"_id": 0}).sort("created_at", -1).to_list(100)
+    return items
+
+
+@api.post("/automations")
+async def create_automation(body: AutomationIn, user: dict = Depends(current_user)):
+    doc = {
+        "id": str(uuid.uuid4()),
+        "user_id": user["id"],
+        "name": body.name,
+        "trigger": body.trigger,
+        "action": body.action,
+        "action_config": body.action_config,
+        "enabled": body.enabled,
+        "fired_count": 0,
+        "created_at": datetime.now(timezone.utc),
+    }
+    await db.automations.insert_one(doc)
+    doc.pop("_id", None)
+    return doc
+
+
+@api.patch("/automations/{aid}")
+async def toggle_automation(aid: str, body: IntegrationToggleIn, user: dict = Depends(current_user)):
+    res = await db.automations.update_one(
+        {"id": aid, "user_id": user["id"]},
+        {"$set": {"enabled": body.enabled}},
+    )
+    if res.matched_count == 0:
+        raise HTTPException(404, "Automation not found")
+    return {"ok": True}
+
+
+@api.delete("/automations/{aid}")
+async def delete_automation(aid: str, user: dict = Depends(current_user)):
+    res = await db.automations.delete_one({"id": aid, "user_id": user["id"]})
+    if res.deleted_count == 0:
+        raise HTTPException(404, "Automation not found")
+    return {"ok": True}
+
+
+async def fire_automations(user_id: str, trigger: str, context: dict) -> None:
+    """Execute matching enabled automations for a trigger."""
+    autos = await db.automations.find({"user_id": user_id, "trigger": trigger, "enabled": True}, {"_id": 0}).to_list(20)
+    for a in autos:
+        try:
+            await _execute_automation(user_id, a, context)
+            await db.automations.update_one({"id": a["id"]}, {"$inc": {"fired_count": 1}})
+        except Exception as e:
+            logger.warning(f"Automation {a['id']} failed: {e}")
+
+
+async def _execute_automation(user_id: str, automation: dict, context: dict) -> None:
+    cfg = automation.get("action_config") or {}
+    if automation["action"] == "log_only":
+        await log_activity(user_id, "ceo", f"Automation fired: {automation['name']}", "automation")
+    elif automation["action"] == "create_task":
+        agent_id = cfg.get("agent_id", "operations")
+        title = cfg.get("title") or f"Auto: {automation['name']}"
+        desc = cfg.get("description") or f"Triggered by {automation['trigger']}"
+        now = datetime.now(timezone.utc)
+        task = {
+            "id": str(uuid.uuid4()), "goal_id": "automation",
+            "user_id": user_id, "agent_id": agent_id,
+            "title": title, "description": desc,
+            "priority": "medium", "status": "planning", "progress": 25,
+            "requires_approval": False, "output": None,
+            "created_at": now, "updated_at": now,
+        }
+        await db.tasks.insert_one(task)
+        await log_activity(user_id, agent_id, f"Auto-assigned: {title}", "automation")
+    elif automation["action"] == "add_knowledge_note":
+        note = {
+            "id": str(uuid.uuid4()), "user_id": user_id, "kind": "note",
+            "title": cfg.get("title") or f"Auto-note: {automation['name']}",
+            "content": cfg.get("content") or f"Automation '{automation['name']}' fired on {automation['trigger']}.",
+            "mime": None, "created_at": datetime.now(timezone.utc),
+        }
+        await db.knowledge.insert_one(note)
+        await log_activity(user_id, "hr", f"Automation indexed note: {note['title']}", "automation")
+
+
+# ============================================================
+# ROUTES: ORGANIZATION / MEMBERS / INVITES
+# ============================================================
+def _gen_invite_code() -> str:
+    import secrets, string
+    return "".join(secrets.choice(string.ascii_uppercase + string.digits) for _ in range(8))
+
+
+@api.get("/org/me")
+async def my_org(user: dict = Depends(current_user)):
+    # Members = all users sharing the same organization string (treats org-name as org-id for MVP).
+    members_raw = await db.users.find({"organization": user["organization"]}, {"_id": 0, "password_hash": 0}).to_list(50)
+    return {
+        "organization": user["organization"],
+        "role": user.get("role", "owner"),
+        "members": [{
+            "id": m["id"], "name": m["name"], "email": m["email"],
+            "role": m.get("role", "owner" if m["id"] == user["id"] else "member"),
+            "joined_at": m["created_at"],
+        } for m in members_raw],
+    }
+
+
+@api.post("/org/invite")
+async def create_invite(user: dict = Depends(current_user)):
+    code = _gen_invite_code()
+    await db.org_invites.insert_one({
+        "code": code,
+        "organization": user["organization"],
+        "created_by": user["id"],
+        "created_at": datetime.now(timezone.utc),
+        "consumed": False,
+    })
+    return {"code": code, "organization": user["organization"]}
+
+
+@api.get("/org/invites")
+async def list_invites(user: dict = Depends(current_user)):
+    invites = await db.org_invites.find(
+        {"organization": user["organization"], "consumed": False},
+        {"_id": 0},
+    ).sort("created_at", -1).to_list(20)
+    return invites
+
+
+@api.post("/org/join")
+async def join_org(body: OrgInviteJoinIn, user: dict = Depends(current_user)):
+    invite = await db.org_invites.find_one({"code": body.code.upper(), "consumed": False}, {"_id": 0})
+    if not invite:
+        raise HTTPException(404, "Invalid or used invite code")
+    new_org = invite["organization"]
+    if new_org == user["organization"]:
+        raise HTTPException(400, "Already a member of this organization")
+    await db.users.update_one(
+        {"id": user["id"]},
+        {"$set": {"organization": new_org, "role": "member"}},
+    )
+    await db.org_invites.update_one({"code": body.code.upper()}, {"$set": {"consumed": True, "consumed_by": user["id"]}})
+    await log_activity(user["id"], "hr", f"{user['name']} joined {new_org}", "org")
+    return {"organization": new_org}
+
+
+@api.delete("/org/members/{member_id}")
+async def remove_member(member_id: str, user: dict = Depends(current_user)):
+    if user.get("role", "owner") != "owner":
+        raise HTTPException(403, "Only owners can remove members")
+    if member_id == user["id"]:
+        raise HTTPException(400, "Cannot remove yourself")
+    target = await db.users.find_one({"id": member_id, "organization": user["organization"]}, {"_id": 0})
+    if not target:
+        raise HTTPException(404, "Member not found")
+    # Move to personal org
+    await db.users.update_one(
+        {"id": member_id},
+        {"$set": {"organization": f"{target['name']}'s Company", "role": "owner"}},
+    )
+    return {"ok": True}
 
 
 # ============================================================
