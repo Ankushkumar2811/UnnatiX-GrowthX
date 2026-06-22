@@ -1,33 +1,39 @@
-import { Stack } from "expo-router";
-import * as SplashScreen from "expo-splash-screen";
-import { useEffect } from "react";
-import { LogBox } from "react-native";
+import { Stack, useRouter, useSegments } from 'expo-router';
+import * as SplashScreen from 'expo-splash-screen';
+import { useEffect } from 'react';
+import { LogBox, View } from 'react-native';
+import { useIconFonts } from '@/src/hooks/use-icon-fonts';
+import { AuthProvider, useAuth } from '@/src/auth';
+import { theme } from '@/src/theme';
 
-import { useIconFonts } from "@/src/hooks/use-icon-fonts";
-
-
-// Disable logbox errors etc so that users can see the app
-// and agent works as expected.
-LogBox.ignoreAllLogs(true)
-
-// Keep the native splash visible from cold start until icon fonts register.
-// Required because @expo/vector-icons' componentDidMount fallback fires
-// Font.loadAsync against a broken vendor path if any <Icon> mounts before
-// the family is registered — which throws on Android Expo Go.
+LogBox.ignoreAllLogs(true);
 SplashScreen.preventAutoHideAsync();
+
+function AuthGate() {
+  const { user, loading } = useAuth();
+  const router = useRouter();
+  const segments = useSegments();
+
+  useEffect(() => {
+    if (loading) return;
+    const inAuth = segments[0] === '(auth)';
+    if (!user && !inAuth) router.replace('/(auth)/login');
+    else if (user && (inAuth || segments.length === 0 || segments[0] === undefined)) router.replace('/(tabs)/dashboard');
+  }, [user, loading, segments]);
+
+  return <Stack screenOptions={{ headerShown: false, contentStyle: { backgroundColor: theme.color.surface } }} />;
+}
 
 export default function RootLayout() {
   const [loaded, error] = useIconFonts();
-
-  useEffect(() => {
-    if (loaded || error) {
-      SplashScreen.hideAsync();
-    }
-  }, [loaded, error]);
-
-  // If the CDN is unreachable we fall through on error rather than wedging
-  // the app — icons will tofu, but the app still boots.
+  useEffect(() => { if (loaded || error) SplashScreen.hideAsync(); }, [loaded, error]);
   if (!loaded && !error) return null;
 
-  return <Stack screenOptions={{ headerShown: false }} />;
+  return (
+    <View style={{ flex: 1, backgroundColor: theme.color.surface }}>
+      <AuthProvider>
+        <AuthGate />
+      </AuthProvider>
+    </View>
+  );
 }
