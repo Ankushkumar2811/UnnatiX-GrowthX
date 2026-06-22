@@ -102,13 +102,21 @@ export default function Dashboard() {
           <Pressable testID="dashboard-admin-link" onPress={() => router.push('/admin' as any)} style={s.quickTile}>
             <Ionicons name="shield" size={18} color={theme.color.brand} />
             <Text style={s.quickTitle}>Admin</Text>
-            <Text style={s.quickSub}>Team · invites · billing</Text>
+            <Text style={s.quickSub}>Team · invites · roles</Text>
           </Pressable>
-          <View style={[s.quickTile, { opacity: 0.5 }]}>
-            <Ionicons name="trending-up" size={18} color={theme.color.onSurfaceTertiary} />
+          <Pressable testID="dashboard-analytics-link" onPress={() => router.push('/analytics' as any)} style={s.quickTile}>
+            <Ionicons name="trending-up" size={18} color={theme.color.brand} />
             <Text style={s.quickTitle}>Analytics</Text>
-            <Text style={s.quickSub}>Coming soon</Text>
-          </View>
+            <Text style={s.quickSub}>Throughput · ROI</Text>
+          </Pressable>
+        </View>
+        <View style={[s.quickRow, { marginTop: 10 }]}>
+          <Pressable testID="dashboard-billing-link" onPress={() => router.push('/billing' as any)} style={s.quickTile}>
+            <Ionicons name="card" size={18} color={theme.color.brand} />
+            <Text style={s.quickTitle}>Billing</Text>
+            <Text style={s.quickSub}>Stripe · plans</Text>
+          </Pressable>
+          <View style={[s.quickTile, { opacity: 0 }]} />
         </View>
 
         <Text style={s.section}>LIVE ACTIVITY FEED</Text>

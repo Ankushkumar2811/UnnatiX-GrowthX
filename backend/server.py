@@ -10,7 +10,7 @@ from typing import List, Optional, Literal
 
 import bcrypt
 import jwt
-from fastapi import FastAPI, APIRouter, HTTPException, Depends, status
+from fastapi import FastAPI, APIRouter, HTTPException, Depends, status, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
@@ -1158,6 +1158,181 @@ async def remove_member(member_id: str, user: dict = Depends(current_user)):
         {"$set": {"organization": f"{target['name']}'s Company", "role": "owner"}},
     )
     return {"ok": True}
+
+
+# ============================================================
+# ROUTES: BILLING (Stripe)
+# ============================================================
+import stripe
+stripe.api_key = os.environ.get("STRIPE_API_KEY", "")
+APP_BASE_URL = os.environ.get("APP_BASE_URL", "http://localhost:3000")
+
+PLAN_PRICING = {
+    "pro":   {"amount_cents": 2900, "name": "UnnatiX GrowthX · Pro",   "tagline": "29/month"},
+    "scale": {"amount_cents": 9900, "name": "UnnatiX GrowthX · Scale", "tagline": "99/month"},
+}
+
+
+class CheckoutIn(BaseModel):
+    plan: Literal["pro", "scale"]
+
+
+@api.get("/billing/plans")
+async def list_plans(user: dict = Depends(current_user)):
+    return {
+        "current_tier": user.get("billing_tier", "free"),
+        "plans": [
+            {"id": "free",  "name": "Free",                              "price_label": "$0",   "features": ["8 AI employees", "Up to 3 active goals", "Sandbox integrations"]},
+            {"id": "pro",   "name": PLAN_PRICING["pro"]["name"],         "price_label": "$29",  "features": ["Unlimited goals", "Real OAuth integrations", "Priority Claude orchestration", "5 team members"]},
+            {"id": "scale", "name": PLAN_PRICING["scale"]["name"],       "price_label": "$99",  "features": ["Everything in Pro", "Unlimited team members", "Custom AI agents", "Dedicated support", "API access"]},
+        ],
+    }
+
+
+@api.post("/billing/checkout-session")
+async def billing_checkout(body: CheckoutIn, user: dict = Depends(current_user)):
+    if not stripe.api_key:
+        raise HTTPException(503, "Stripe not configured")
+    plan = PLAN_PRICING[body.plan]
+    try:
+        from emergentintegrations.payments.stripe.checkout import StripeCheckout, CheckoutSessionRequest
+        sc = StripeCheckout(api_key=stripe.api_key)
+        req = CheckoutSessionRequest(
+            amount=plan["amount_cents"] / 100.0,
+            currency="usd",
+            quantity=1,
+            success_url=f"{APP_BASE_URL}/billing?success=1&session_id={{CHECKOUT_SESSION_ID}}",
+            cancel_url=f"{APP_BASE_URL}/billing?cancelled=1",
+            metadata={"user_id": user["id"], "plan": body.plan, "organization": user["organization"]},
+            payment_methods=["card"],
+        )
+        session = await sc.create_checkout_session(req)
+    except Exception as e:
+        logger.error(f"Stripe error: {e}")
+        raise HTTPException(502, f"Stripe error: {str(e)}")
+    return {"url": session.url, "session_id": session.session_id}
+
+
+@api.get("/billing/session/{session_id}")
+async def billing_session_status(session_id: str, user: dict = Depends(current_user)):
+    """Polled by the frontend after redirect to update local tier."""
+    if not stripe.api_key:
+        raise HTTPException(503, "Stripe not configured")
+    try:
+        from emergentintegrations.payments.stripe.checkout import StripeCheckout
+        sc = StripeCheckout(api_key=stripe.api_key)
+        status_obj = await sc.get_checkout_status(session_id)
+    except Exception as e:
+        raise HTTPException(404, str(e))
+    payment_status = getattr(status_obj, "payment_status", None) or getattr(status_obj, "status", "unknown")
+    md = getattr(status_obj, "metadata", {}) or {}
+    if md.get("user_id") == user["id"] and payment_status in ("paid", "complete"):
+        plan = md.get("plan", "pro")
+        await db.users.update_one(
+            {"id": user["id"]},
+            {"$set": {"billing_tier": plan, "subscription_status": "active"}},
+        )
+        await log_activity(user["id"], "ceo", f"Subscription activated · {plan.upper()} tier", "billing")
+    return {"payment_status": payment_status, "plan": md.get("plan")}
+
+
+@api.post("/billing/webhook")
+async def stripe_webhook(request: Request):
+    """Stripe webhook — verifies signature & idempotently updates user billing state."""
+    raw = await request.body()
+    sig = request.headers.get("stripe-signature", "")
+    secret = os.environ.get("STRIPE_WEBHOOK_SECRET")
+    if not secret:
+        # No webhook secret configured — accept events without verification (dev mode)
+        try:
+            event = json.loads(raw.decode())
+        except Exception:
+            raise HTTPException(400, "Invalid payload")
+    else:
+        try:
+            event = stripe.Webhook.construct_event(raw, sig, secret)
+        except stripe.error.SignatureVerificationError:
+            raise HTTPException(400, "Bad signature")
+
+    event_id = event.get("id")
+    if event_id and await db.stripe_events.find_one({"_id": event_id}):
+        return {"status": "duplicate"}
+    if event_id:
+        await db.stripe_events.insert_one({"_id": event_id, "type": event.get("type")})
+
+    typ = event.get("type", "")
+    obj = (event.get("data") or {}).get("object", {})
+
+    if typ == "checkout.session.completed":
+        user_id = obj.get("client_reference_id") or (obj.get("metadata") or {}).get("user_id")
+        plan = (obj.get("metadata") or {}).get("plan", "pro")
+        if user_id:
+            await db.users.update_one(
+                {"id": user_id},
+                {"$set": {"billing_tier": plan, "stripe_customer_id": obj.get("customer"), "stripe_subscription_id": obj.get("subscription"), "subscription_status": "active"}},
+            )
+    elif typ in ("customer.subscription.deleted", "customer.subscription.canceled"):
+        sub_id = obj.get("id")
+        if sub_id:
+            await db.users.update_one(
+                {"stripe_subscription_id": sub_id},
+                {"$set": {"billing_tier": "free", "subscription_status": "canceled"}},
+            )
+    return {"status": "ok"}
+
+
+# ============================================================
+# ROUTES: ANALYTICS
+# ============================================================
+@api.get("/analytics/overview")
+async def analytics_overview(user: dict = Depends(current_user)):
+    uid = user["id"]
+    agent_counts = []
+    for emp in AI_EMPLOYEES:
+        if emp["id"] == "ceo":
+            continue
+        completed = await db.tasks.count_documents({"user_id": uid, "agent_id": emp["id"], "status": "completed"})
+        active = await db.tasks.count_documents({"user_id": uid, "agent_id": emp["id"], "status": {"$in": ["planning", "running"]}})
+        agent_counts.append({"agent_id": emp["id"], "name": emp["name"], "accent": emp["accent"], "completed": completed, "active": active})
+
+    statuses = ["pending", "planning", "running", "waiting_approval", "completed", "cancelled"]
+    status_counts = []
+    for st in statuses:
+        c = await db.tasks.count_documents({"user_id": uid, "status": st})
+        status_counts.append({"status": st, "count": c})
+
+    appr_approved = await db.approvals.count_documents({"user_id": uid, "status": "approved"})
+    appr_rejected = await db.approvals.count_documents({"user_id": uid, "status": "rejected"})
+    appr_pending  = await db.approvals.count_documents({"user_id": uid, "status": "pending"})
+
+    # Goals over last 14 days
+    from datetime import timedelta
+    today = datetime.now(timezone.utc).date()
+    timeline = []
+    for offset in range(13, -1, -1):
+        day = today - timedelta(days=offset)
+        start = datetime.combine(day, datetime.min.time(), tzinfo=timezone.utc)
+        end = start + timedelta(days=1)
+        c = await db.goals.count_documents({"user_id": uid, "created_at": {"$gte": start, "$lt": end}})
+        timeline.append({"date": day.isoformat(), "goals": c})
+
+    total_outputs = await db.tasks.count_documents({"user_id": uid, "output": {"$ne": None}})
+    total_meetings = await db.meetings.count_documents({"user_id": uid, "status": {"$ne": "cancelled"}})
+    knowledge_count = await db.knowledge.count_documents({"user_id": uid})
+    automations_active = await db.automations.count_documents({"user_id": uid, "enabled": True})
+
+    return {
+        "agent_throughput": agent_counts,
+        "status_breakdown": status_counts,
+        "approvals": {"approved": appr_approved, "rejected": appr_rejected, "pending": appr_pending},
+        "goals_timeline": timeline,
+        "headlines": {
+            "total_outputs_generated": total_outputs,
+            "meetings_scheduled": total_meetings,
+            "knowledge_items": knowledge_count,
+            "automations_active": automations_active,
+        },
+    }
 
 
 # ============================================================
