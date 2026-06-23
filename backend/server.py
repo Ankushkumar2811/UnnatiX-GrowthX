@@ -321,6 +321,7 @@ class LeadSearchIn(BaseModel):
     query: str = Field(min_length=2, max_length=160)
     location: str = Field(default="Delhi NCR", min_length=2, max_length=100)
     max_results: int = Field(default=10, ge=1, le=20)
+    kind: Literal["prospect", "competitor"] = "prospect"
 
 
 class LeadEnrichIn(BaseModel):
@@ -818,6 +819,27 @@ async def get_goal(goal_id: str, user: dict = Depends(current_user)):
     return GoalOut(**goal, tasks=[Task(**t) for t in tasks_raw])
 
 
+@api.post("/goals/{goal_id}/restart-real")
+async def restart_goal_with_live_tools(goal_id: str, user: dict = Depends(current_user)):
+    goal = await db.goals.find_one({"id": goal_id, "user_id": user["id"]}, {"_id": 0})
+    if not goal:
+        raise HTTPException(404, "Goal not found")
+    tasks = await db.tasks.find({"goal_id": goal_id, "user_id": user["id"]}, {"_id": 0}).to_list(100)
+    reset = 0
+    for task in tasks:
+        if task.get("status") in {"waiting_approval", "cancelled"}:
+            continue
+        delivery = _delivery_type(task)
+        await db.tasks.update_one({"id": task["id"]}, {"$set": {
+            "status": "planning", "progress": 25, "output": None, "evidence": [],
+            "delivery_type": delivery, "execution_status": "queued", "updated_at": datetime.now(timezone.utc),
+        }, "$unset": {"retry_after": ""}})
+        reset += 1
+    await db.goals.update_one({"id": goal_id}, {"$set": {"status": "running"}})
+    await log_activity(user["id"], "ceo", f"Restarted {reset} tasks with live-tool execution rules", "goal")
+    return {"ok": True, "reset": reset}
+
+
 # ============================================================
 # ROUTES: TASKS
 # ============================================================
@@ -974,6 +996,85 @@ async def llm_generate_output(agent_id: str, task: dict, knowledge: List[dict]) 
     return await llm_complete(sys_prompt, user_prompt)
 
 
+def _prospect_queries(objective: str) -> List[str]:
+    text = objective.lower()
+    if "dental" in text or "dentist" in text:
+        return ["dental clinics"]
+    if "real estate" in text:
+        return ["real estate agencies", "property developers"]
+    if "education" in text or "coaching" in text:
+        return ["coaching institutes", "private schools"]
+    return ["dental clinics", "real estate agencies", "coaching institutes"]
+
+
+async def execute_agent_task(task: dict, user: dict, knowledge: List[dict]) -> dict:
+    """Route employee work to live tools when available; never label a draft as external execution."""
+    goal = await db.goals.find_one({"id": task.get("goal_id"), "user_id": user["id"]}, {"_id": 0})
+    objective = (goal or {}).get("objective", task.get("description", ""))
+    title_text = f"{task.get('title', '')} {task.get('description', '')}".lower()
+
+    if task.get("agent_id") == "research" and any(x in title_text for x in ("market", "competitor", "audience")):
+        result = await search_live_leads(LeadSearchIn(
+            query="digital marketing agencies", location="Delhi NCR", max_results=5, kind="competitor"
+        ), user)
+        leads = result.get("leads", [])
+        lines = ["## Live Delhi NCR competitor evidence", ""]
+        evidence = []
+        for lead in leads:
+            source = lead.get("google_maps_url") or lead.get("website")
+            if source:
+                evidence.append(source)
+            lines.append(f"- **{lead['company_name']}** — {lead.get('location') or 'Delhi NCR'} — [source]({source})")
+        lines.extend(["", f"Retrieved {len(leads)} current Google Places records for objective: {objective}",
+                      "These are source-backed competitor records, not invented ad-spend or performance claims."])
+        return {"output": "\n".join(lines), "execution_status": "executed_with_evidence", "evidence": evidence}
+
+    if task.get("agent_id") == "sales" and any(x in title_text for x in ("prospect", "lead list", "qualified", "target list")):
+        found = []
+        for query in _prospect_queries(objective):
+            result = await search_live_leads(LeadSearchIn(
+                query=query, location="Delhi NCR", max_results=4, kind="prospect"
+            ), user)
+            found.extend(result.get("leads", []))
+        enriched = await enrich_live_leads(LeadEnrichIn(limit=3, verify_email=True), user)
+        verified = [item for item in enriched.get("leads", []) if item.get("email_verification_status") == "verified"]
+        evidence = []
+        lines = [f"## Real prospect batch — {len(found)} businesses", ""]
+        for lead in found:
+            source = lead.get("google_maps_url") or lead.get("website")
+            if source:
+                evidence.append(source)
+            lines.append(f"- **{lead['company_name']}** — phone: {lead.get('phone') or 'not public'} — [Google source]({source})")
+        lines.extend(["", f"Website/Hunter enrichment checked: {enriched.get('count', 0)}", f"Verified emails ready for approval: {len(verified)}",
+                      "All records are stored in Live Leads with source URLs; no contact detail was invented."])
+        return {"output": "\n".join(lines), "execution_status": "executed_with_evidence", "evidence": evidence}
+
+    if task.get("agent_id") == "sales" and any(x in title_text for x in ("outreach", "email", "follow-up", "follow up")):
+        leads = await db.leads.find({
+            "user_id": user["id"], "lead_kind": {"$ne": "competitor"},
+            "email_verification_status": "verified", "do_not_contact": {"$ne": True},
+            "pipeline_stage": {"$nin": ["awaiting_approval", "contacted", "replied"]},
+        }, {"_id": 0}).limit(3).to_list(3)
+        approvals = []
+        for lead in leads:
+            try:
+                approvals.append(await _queue_deterministic_outreach(user, lead))
+            except HTTPException as exc:
+                if exc.status_code != 409:
+                    raise
+        return {
+            "output": f"Created {len(approvals)} personalized, verified-email outreach drafts. Review each payload in Founder Approvals; zero emails were sent without approval.",
+            "execution_status": "awaiting_founder_approval" if approvals else "needs_verified_leads",
+            "evidence": [a["approval_id"] for a in approvals],
+        }
+
+    enriched_task = {**task, "description": f"Goal objective: {objective}\n\nTask brief: {task.get('description', '')}"}
+    output = await llm_generate_output(task["agent_id"], enriched_task, knowledge)
+    delivery = task.get("delivery_type") or _delivery_type(task)
+    status_value = "document_delivered" if delivery == "document" else "draft_ready_needs_integration"
+    return {"output": output, "execution_status": status_value, "evidence": []}
+
+
 @api.post("/tasks/{task_id}/generate")
 async def generate_task_output(task_id: str, user: dict = Depends(current_user)):
     task = await db.tasks.find_one({"id": task_id, "user_id": user["id"]}, {"_id": 0})
@@ -985,7 +1086,8 @@ async def generate_task_output(task_id: str, user: dict = Depends(current_user))
     knowledge = await db.knowledge.find({"user_id": user["id"]}, {"_id": 0}).sort("created_at", -1).to_list(5)
 
     try:
-        output = await llm_generate_output(task["agent_id"], task, knowledge)
+        result = await execute_agent_task(task, user, knowledge)
+        output = result["output"]
     except HTTPException:
         raise
     except Exception as e:
@@ -996,7 +1098,7 @@ async def generate_task_output(task_id: str, user: dict = Depends(current_user))
     await db.tasks.update_one(
         {"id": task_id},
         {"$set": {"output": output, "status": "completed", "progress": 100,
-                  "execution_status": _result_status(task), "updated_at": now}},
+                  "execution_status": result["execution_status"], "evidence": result.get("evidence", []), "updated_at": now}},
     )
     agent_name = next((e["name"] for e in AI_EMPLOYEES if e["id"] == task["agent_id"]), task["agent_id"])
     await log_activity(user["id"], task["agent_id"], f"{agent_name} delivered: {task['title']}", "output")
@@ -1020,10 +1122,11 @@ async def run_next_goal_task(goal_id: str, user: dict = Depends(current_user)):
     task.pop("_id", None)
     knowledge = await db.knowledge.find({"user_id": user["id"]}, {"_id": 0}).sort("created_at", -1).to_list(5)
     try:
-        output = await llm_generate_output(task["agent_id"], task, knowledge)
+        result = await execute_agent_task(task, user, knowledge)
+        output = result["output"]
         await db.tasks.update_one({"id": task["id"]}, {"$set": {
             "output": output, "status": "completed", "progress": 100,
-            "execution_status": _result_status(task), "updated_at": datetime.now(timezone.utc),
+            "execution_status": result["execution_status"], "evidence": result.get("evidence", []), "updated_at": datetime.now(timezone.utc),
         }, "$unset": {"retry_after": ""}})
         await log_activity(user["id"], task["agent_id"], f"Auto-delivered: {task['title']}", "output")
         remaining = await db.tasks.count_documents({"goal_id": goal_id, "user_id": user["id"], "status": "planning"})
@@ -1040,7 +1143,8 @@ async def run_next_goal_task(goal_id: str, user: dict = Depends(current_user)):
             "updated_at": datetime.now(timezone.utc),
         }})
         logger.error("Autonomous task failed: %s", exc)
-        raise HTTPException(429, "Gemini quota is temporarily busy. Employee paused for 5 minutes; task is safe in retry queue.")
+        remaining = await db.tasks.count_documents({"goal_id": goal_id, "user_id": user["id"], "status": "planning"})
+        return {"processed": False, "retry_queued": True, "task_id": task["id"], "remaining": remaining}
 
 
 @api.post("/tasks/quick")
@@ -1456,6 +1560,7 @@ async def search_live_leads(body: LeadSearchIn, user: dict = Depends(current_use
             "rating": place.get("rating"), "review_count": place.get("userRatingCount"),
             "business_status": place.get("businessStatus"),
             "source": "google_places", "source_urls": [u for u in [place.get("googleMapsUri"), place.get("websiteUri")] if u],
+            "lead_kind": body.kind,
             "email_verification_status": "not_found", "pipeline_stage": "researched",
             "outreach_eligibility": "needs_public_contact", "do_not_contact": False,
             "retrieved_at": now, "updated_at": now,
@@ -1473,7 +1578,7 @@ async def search_live_leads(body: LeadSearchIn, user: dict = Depends(current_use
 
 @api.get("/leads")
 async def list_live_leads(user: dict = Depends(current_user)):
-    return await db.leads.find({"user_id": user["id"]}, {"_id": 0}).sort("created_at", -1).to_list(500)
+    return await db.leads.find({"user_id": user["id"], "lead_kind": {"$ne": "competitor"}}, {"_id": 0}).sort("created_at", -1).to_list(500)
 
 
 EMAIL_RE = re.compile(r"[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}", re.IGNORECASE)
@@ -1602,7 +1707,7 @@ async def _hunter_verify_email(email: str) -> dict:
 
 @api.post("/leads/enrich")
 async def enrich_live_leads(body: LeadEnrichIn, user: dict = Depends(current_user)):
-    query = {"user_id": user["id"], "website": {"$nin": [None, ""]}}
+    query = {"user_id": user["id"], "lead_kind": {"$ne": "competitor"}, "website": {"$nin": [None, ""]}}
     if body.lead_id:
         query["id"] = body.lead_id
     else:
@@ -1678,6 +1783,43 @@ async def _send_outreach(user_id: str, outreach_id: str) -> dict:
     })
     await log_activity(user_id, "sales", f"Approved outreach sent to {lead['company_name']} · evidence {message_id}", "outreach")
     return await db.outreach.find_one({"id": outreach_id}, {"_id": 0})
+
+
+async def _queue_deterministic_outreach(user: dict, lead: dict) -> dict:
+    duplicate = await db.outreach.find_one({
+        "user_id": user["id"], "lead_id": lead["id"], "status": {"$in": ["pending_approval", "sent"]},
+    }, {"_id": 0})
+    if duplicate:
+        raise HTTPException(409, "This lead already has pending or sent outreach")
+    subject = f"A digital growth idea for {lead['company_name']}"
+    body = (
+        f"Hi {lead['company_name']} team,\n\n"
+        f"I came across your publicly listed business presence in {lead.get('location') or 'Delhi NCR'}. "
+        "UnnatiX Technologies helps businesses improve local SEO, social content, paid campaigns and conversion-focused websites.\n\n"
+        "We would be happy to share a free 20-minute digital growth audit with a few practical opportunities specific to your online presence. "
+        "Would a short 15-minute call next week be useful?\n\n"
+        "If this is not relevant, reply no and I will not follow up.\n\n"
+        "Regards,\nArjun Mehta\nUnnatiX Technologies"
+    )
+    now = datetime.now(timezone.utc)
+    outreach_id, approval_id = str(uuid.uuid4()), str(uuid.uuid4())
+    outreach = {
+        "id": outreach_id, "user_id": user["id"], "lead_id": lead["id"],
+        "to_email": lead["email"], "company_name": lead["company_name"],
+        "subject": subject, "body": body, "status": "pending_approval", "followup_number": 0,
+        "approval_id": approval_id, "source_urls": lead.get("source_urls", []), "created_at": now, "updated_at": now,
+    }
+    await db.outreach.insert_one(outreach)
+    await db.approvals.insert_one({
+        "id": approval_id, "user_id": user["id"], "task_id": outreach_id, "agent_id": "sales",
+        "action": f"Send real email to {lead['company_name']}",
+        "impact": f"Will send from {SMTP_FROM_EMAIL} to Hunter-verified address {lead['email']}.",
+        "payload_preview": f"TO: {lead['email']}\nSUBJECT: {subject}\n\n{body}",
+        "status": "pending", "kind": "outreach_send", "created_at": now,
+    })
+    await db.leads.update_one({"id": lead["id"]}, {"$set": {"pipeline_stage": "awaiting_approval", "updated_at": now}})
+    outreach.pop("_id", None)
+    return outreach
 
 
 @api.post("/outreach/draft")

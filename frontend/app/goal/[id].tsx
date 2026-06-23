@@ -49,7 +49,7 @@ export default function GoalDetail() {
     );
   }
 
-  const done = goal.tasks.filter(t => t.status === 'completed').length;
+  const done = goal.tasks.filter(t => t.status === 'completed' && ['executed_with_evidence','document_delivered'].includes(t.execution_status || '')).length;
   const pct = goal.tasks.length === 0 ? 0 : Math.round((done / goal.tasks.length) * 100);
 
   return (
@@ -96,7 +96,7 @@ export default function GoalDetail() {
                 <View style={s.cardHead}>
                   <Text style={[s.agentLabel, { color: meta.accent }]}>{meta.name.toUpperCase()} · {meta.role.toUpperCase()}</Text>
                   <View style={[s.statBadge, { borderColor: STATUS_COLOR[t.status] + '66', backgroundColor: STATUS_COLOR[t.status] + '15' }]}>
-                    <Text style={[s.statText, { color: STATUS_COLOR[t.status] }]}>{STATUS_LABEL[t.status]}</Text>
+                    <Text style={[s.statText, { color: t.execution_status === 'executed_with_evidence' ? theme.color.success : STATUS_COLOR[t.status] }]}>{t.execution_status === 'executed_with_evidence' ? 'REAL EXECUTED' : t.execution_status?.includes('needs_integration') ? 'DRAFT READY' : STATUS_LABEL[t.status]}</Text>
                   </View>
                 </View>
                 <Text style={s.taskTitle}>{t.title}</Text>
@@ -108,7 +108,7 @@ export default function GoalDetail() {
 
                 {t.output ? (
                   <View style={s.outputBox}>
-                    <Text style={s.outputLabel}>{meta.name.toUpperCase()}'S DELIVERABLE</Text>
+                    <Text style={s.outputLabel}>{t.execution_status === 'executed_with_evidence' ? 'VERIFIED TOOL EXECUTION' : `${meta.name.toUpperCase()}'S DELIVERABLE`}</Text>
                     <Text style={s.outputText}>{t.output}</Text>
                   </View>
                 ) : t.status === 'waiting_approval' ? (
