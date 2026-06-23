@@ -1035,7 +1035,20 @@ async def execute_agent_task(task: dict, user: dict, knowledge: List[dict]) -> d
             result = await search_live_leads(LeadSearchIn(
                 query=query, location="Delhi NCR", max_results=4, kind="prospect"
             ), user)
-            found.extend(result.get("leads", []))
+            batch = result.get("leads", [])
+            found.extend(batch)
+            lead_ids = [lead.get("id") for lead in batch if lead.get("id")]
+            if lead_ids:
+                await db.leads.update_many(
+                    {"user_id": user["id"], "id": {"$in": lead_ids}},
+                    {"$set": {
+                        "discovered_by": "sales_agent",
+                        "discovery_goal_id": task.get("goal_id"),
+                        "discovery_task_id": task.get("id"),
+                        "discovery_query": query,
+                        "discovery_run_at": datetime.now(timezone.utc),
+                    }},
+                )
         enriched = await enrich_live_leads(LeadEnrichIn(limit=3, verify_email=True), user)
         verified = [item for item in enriched.get("leads", []) if item.get("email_verification_status") == "verified"]
         evidence = []
@@ -1579,6 +1592,41 @@ async def search_live_leads(body: LeadSearchIn, user: dict = Depends(current_use
 @api.get("/leads")
 async def list_live_leads(user: dict = Depends(current_user)):
     return await db.leads.find({"user_id": user["id"], "lead_kind": {"$ne": "competitor"}}, {"_id": 0}).sort("created_at", -1).to_list(500)
+
+
+@api.get("/leads/agent-live")
+async def live_sales_agent_discovery(user: dict = Depends(current_user)):
+    tasks = await db.tasks.find(
+        {"user_id": user["id"], "agent_id": "sales", "$or": [
+            {"title": {"$regex": "lead|prospect|qualified|target", "$options": "i"}},
+            {"description": {"$regex": "lead|prospect|qualified|target", "$options": "i"}},
+        ]},
+        {"_id": 0},
+    ).sort("updated_at", -1).limit(10).to_list(10)
+    runs = []
+    for task in tasks:
+        goal = await db.goals.find_one(
+            {"id": task.get("goal_id"), "user_id": user["id"]},
+            {"_id": 0, "objective": 1},
+        )
+        discovered = await db.leads.count_documents({
+            "user_id": user["id"], "discovery_task_id": task["id"],
+        })
+        verified = await db.leads.count_documents({
+            "user_id": user["id"], "discovery_task_id": task["id"],
+            "email_verification_status": "verified",
+        })
+        runs.append({
+            "task_id": task["id"], "goal_id": task.get("goal_id"),
+            "title": task.get("title"), "objective": (goal or {}).get("objective"),
+            "status": task.get("status"), "execution_status": task.get("execution_status"),
+            "progress": task.get("progress", 0), "discovered": discovered,
+            "verified": verified, "updated_at": task.get("updated_at"),
+        })
+    leads = await db.leads.find(
+        {"user_id": user["id"], "discovered_by": "sales_agent"}, {"_id": 0},
+    ).sort("discovery_run_at", -1).limit(500).to_list(500)
+    return {"runs": runs, "leads": leads, "updated_at": datetime.now(timezone.utc)}
 
 
 EMAIL_RE = re.compile(r"[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}", re.IGNORECASE)
