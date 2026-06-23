@@ -4,6 +4,10 @@ import logging
 import uuid
 import asyncio
 import json
+import smtplib
+import ssl
+from email.message import EmailMessage
+from email.utils import formataddr, make_msgid
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import List, Optional, Literal
@@ -31,6 +35,13 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-5.4")
 ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-6")
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash-lite")
+SMTP_HOST = os.environ.get("SMTP_HOST", "")
+SMTP_PORT = int(os.environ.get("SMTP_PORT", "587"))
+SMTP_USER = os.environ.get("SMTP_USER", "")
+SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD", "")
+SMTP_FROM_EMAIL = os.environ.get("SMTP_FROM_EMAIL", SMTP_USER)
+SMTP_FROM_NAME = os.environ.get("SMTP_FROM_NAME", "UnnatiX Technologies")
+SMTP_SECURITY = os.environ.get("SMTP_SECURITY", "starttls").lower()
 LLM_PROVIDER_ORDER = [
     p.strip().lower()
     for p in os.environ.get("LLM_PROVIDER_ORDER", "openai,anthropic,gemini").split(",")
@@ -277,6 +288,10 @@ class KnowledgeIn(BaseModel):
 
 class IntegrationToggleIn(BaseModel):
     enabled: bool
+
+
+class SMTPTestIn(BaseModel):
+    to_email: Optional[EmailStr] = None
 
 
 class KnowledgeFileIn(BaseModel):
@@ -1046,8 +1061,42 @@ async def delete_knowledge(kid: str, user: dict = Depends(current_user)):
 # ============================================================
 # ROUTES: INTEGRATIONS (sandbox / mocked — real OAuth requires credentials)
 # ============================================================
+def _smtp_configured() -> bool:
+    return all((SMTP_HOST, SMTP_USER, SMTP_PASSWORD, SMTP_FROM_EMAIL))
+
+
+def _smtp_send_sync(to_email: str, subject: str, text_body: str) -> str:
+    if not _smtp_configured():
+        raise RuntimeError("SMTP is not configured")
+    message_id = make_msgid(domain=SMTP_FROM_EMAIL.split("@")[-1])
+    msg = EmailMessage()
+    msg["From"] = formataddr((SMTP_FROM_NAME, SMTP_FROM_EMAIL))
+    msg["To"] = to_email
+    msg["Subject"] = subject
+    msg["Message-ID"] = message_id
+    msg.set_content(text_body)
+    context = ssl.create_default_context()
+    if SMTP_SECURITY == "ssl":
+        with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=25, context=context) as server:
+            server.login(SMTP_USER, SMTP_PASSWORD)
+            server.send_message(msg)
+    else:
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=25) as server:
+            server.ehlo()
+            if SMTP_SECURITY == "starttls":
+                server.starttls(context=context)
+                server.ehlo()
+            server.login(SMTP_USER, SMTP_PASSWORD)
+            server.send_message(msg)
+    return message_id
+
+
+async def smtp_send(to_email: str, subject: str, text_body: str) -> str:
+    return await asyncio.to_thread(_smtp_send_sync, to_email, subject, text_body)
+
+
 INTEGRATION_CATALOG = [
-    {"id": "gmail", "name": "Gmail", "category": "Email", "description": "Send approved outreach drafts via your inbox.", "requires_keys": ["OAuth client + refresh token"]},
+    {"id": "smtp", "name": "SMTP Email", "category": "Email", "description": "Send real approved outreach and notifications from your company inbox.", "requires_keys": ["SMTP host, user and app password"]},
     {"id": "slack", "name": "Slack", "category": "Messaging", "description": "Post approvals & summaries to your team channel.", "requires_keys": ["Bot User OAuth Token"]},
     {"id": "hubspot", "name": "HubSpot", "category": "CRM", "description": "Sync Sales leads & pipeline stages.", "requires_keys": ["Private app access token"]},
     {"id": "calendar", "name": "Google Calendar", "category": "Calendar", "description": "Schedule meetings post-approval.", "requires_keys": ["OAuth client + refresh token"]},
@@ -1061,10 +1110,11 @@ async def list_integrations(user: dict = Depends(current_user)):
     out = []
     for cat in INTEGRATION_CATALOG:
         rec = existing.get(cat["id"], {})
+        is_live_smtp = cat["id"] == "smtp" and _smtp_configured() and rec.get("status") != "not_configured"
         out.append({
             **cat,
-            "status": rec.get("status", "not_configured"),
-            "mode": "sandbox",
+            "status": "connected_live" if is_live_smtp else rec.get("status", "not_configured"),
+            "mode": "live" if is_live_smtp else "sandbox",
             "configured_at": rec.get("configured_at"),
         })
     return out
@@ -1074,7 +1124,9 @@ async def list_integrations(user: dict = Depends(current_user)):
 async def toggle_integration(provider: str, body: IntegrationToggleIn, user: dict = Depends(current_user)):
     if provider not in {c["id"] for c in INTEGRATION_CATALOG}:
         raise HTTPException(404, "Unknown integration")
-    status_value = "connected_sandbox" if body.enabled else "not_configured"
+    if provider == "smtp" and body.enabled and not _smtp_configured():
+        raise HTTPException(400, "SMTP environment variables are incomplete")
+    status_value = ("connected_live" if provider == "smtp" else "connected_sandbox") if body.enabled else "not_configured"
     now = datetime.now(timezone.utc)
     await db.integrations.update_one(
         {"user_id": user["id"], "id": provider},
@@ -1085,6 +1137,32 @@ async def toggle_integration(provider: str, body: IntegrationToggleIn, user: dic
     action = "connected (sandbox)" if body.enabled else "disconnected"
     await log_activity(user["id"], "ceo", f"{name} {action}", "integration")
     return {"id": provider, "status": status_value}
+
+
+@api.post("/integrations/smtp/test")
+async def test_smtp(body: SMTPTestIn, user: dict = Depends(current_user)):
+    if not _smtp_configured():
+        raise HTTPException(400, "SMTP environment variables are incomplete")
+    recipient = str(body.to_email or user["email"])
+    try:
+        message_id = await smtp_send(
+            recipient,
+            "UnnatiX GrowthX SMTP connected",
+            "SMTP is live. UnnatiX AI employees can now send founder-approved emails through this inbox.",
+        )
+    except smtplib.SMTPAuthenticationError:
+        raise HTTPException(502, "SMTP authentication failed; use a valid app password")
+    except Exception as exc:
+        logger.error("SMTP test failed: %s", type(exc).__name__)
+        raise HTTPException(502, "SMTP connection or delivery failed")
+    event = {
+        "id": str(uuid.uuid4()), "user_id": user["id"], "kind": "smtp_test",
+        "to_email": recipient, "message_id": message_id, "status": "sent",
+        "created_at": datetime.now(timezone.utc),
+    }
+    await db.email_events.insert_one(event)
+    await log_activity(user["id"], "sales", f"Live SMTP test sent to {recipient}", "integration")
+    return {"ok": True, "status": "sent", "message_id": message_id, "to_email": recipient}
 
 
 # ============================================================

@@ -8,7 +8,7 @@ import { api } from '@/src/api';
 
 type Integration = { id: string; name: string; category: string; description: string; status: string; mode: string };
 
-const ICONS: Record<string, any> = { gmail: 'mail', slack: 'chatbubbles', hubspot: 'people-circle', calendar: 'calendar', notion: 'document-text' };
+const ICONS: Record<string, any> = { smtp: 'mail', gmail: 'mail', slack: 'chatbubbles', hubspot: 'people-circle', calendar: 'calendar', notion: 'document-text' };
 
 export default function Integrations() {
   const router = useRouter();
@@ -43,13 +43,14 @@ export default function Integrations() {
         <View style={s.banner} testID="integrations-sandbox-banner">
           <Ionicons name="warning" size={16} color={theme.color.warning} />
           <View style={{ flex: 1 }}>
-            <Text style={s.bannerTitle}>SANDBOX MODE · MOCKED</Text>
-            <Text style={s.bannerText}>Toggling connects a sandbox stub for the demo. Real OAuth wiring requires your provider credentials — ask main agent to enable live mode.</Text>
+            <Text style={s.bannerTitle}>LIVE INTEGRATIONS</Text>
+            <Text style={s.bannerText}>SMTP becomes live after secure server credentials are configured. Other providers remain sandboxed until connected.</Text>
           </View>
         </View>
 
         {items.map(i => {
-          const connected = i.status === 'connected_sandbox';
+          const connected = i.status === 'connected_sandbox' || i.status === 'connected_live';
+          const live = i.status === 'connected_live';
           return (
             <View key={i.id} style={s.card} testID={`integration-${i.id}`}>
               <View style={[s.iconWrap, connected && { backgroundColor: theme.color.brand + '22', borderColor: theme.color.brand + '66' }]}>
@@ -64,11 +65,11 @@ export default function Integrations() {
                 <View style={s.footRow}>
                   <View style={[s.statusPill, connected && { backgroundColor: theme.color.success + '22', borderColor: theme.color.success + '55' }]}>
                     <View style={[s.dot, { backgroundColor: connected ? theme.color.success : theme.color.onSurfaceTertiary }]} />
-                    <Text style={[s.statusText, connected && { color: theme.color.success }]}>{connected ? 'CONNECTED · SANDBOX' : 'NOT CONFIGURED'}</Text>
+                    <Text style={[s.statusText, connected && { color: theme.color.success }]}>{live ? 'CONNECTED · LIVE' : connected ? 'CONNECTED · SANDBOX' : 'NOT CONFIGURED'}</Text>
                   </View>
                   <Pressable testID={`integration-toggle-${i.id}`} onPress={() => toggle(i)} disabled={busy === i.id} style={[s.btn, connected && s.btnDisconnect]}>
                     {busy === i.id ? <ActivityIndicator size="small" color={connected ? theme.color.error : '#fff'} />
-                      : <Text style={[s.btnText, connected && { color: theme.color.error }]}>{connected ? 'Disconnect' : 'Connect (sandbox)'}</Text>}
+                      : <Text style={[s.btnText, connected && { color: theme.color.error }]}>{connected ? 'Disconnect' : i.id === 'smtp' ? 'Connect live' : 'Connect sandbox'}</Text>}
                   </Pressable>
                 </View>
               </View>
