@@ -42,6 +42,7 @@ SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD", "")
 SMTP_FROM_EMAIL = os.environ.get("SMTP_FROM_EMAIL", SMTP_USER)
 SMTP_FROM_NAME = os.environ.get("SMTP_FROM_NAME", "UnnatiX Technologies")
 SMTP_SECURITY = os.environ.get("SMTP_SECURITY", "starttls").lower()
+GOOGLE_PLACES_API_KEY = os.environ.get("GOOGLE_PLACES_API_KEY", "")
 LLM_PROVIDER_ORDER = [
     p.strip().lower()
     for p in os.environ.get("LLM_PROVIDER_ORDER", "openai,anthropic,gemini").split(",")
@@ -292,6 +293,12 @@ class IntegrationToggleIn(BaseModel):
 
 class SMTPTestIn(BaseModel):
     to_email: Optional[EmailStr] = None
+
+
+class LeadSearchIn(BaseModel):
+    query: str = Field(min_length=2, max_length=160)
+    location: str = Field(default="Delhi NCR", min_length=2, max_length=100)
+    max_results: int = Field(default=10, ge=1, le=20)
 
 
 class KnowledgeFileIn(BaseModel):
@@ -1163,6 +1170,86 @@ async def test_smtp(body: SMTPTestIn, user: dict = Depends(current_user)):
     await db.email_events.insert_one(event)
     await log_activity(user["id"], "sales", f"Live SMTP test sent to {recipient}", "integration")
     return {"ok": True, "status": "sent", "message_id": message_id, "to_email": recipient}
+
+
+# ============================================================
+# ROUTES: LIVE LEAD DISCOVERY (GOOGLE PLACES)
+# ============================================================
+@api.post("/leads/search")
+async def search_live_leads(body: LeadSearchIn, user: dict = Depends(current_user)):
+    if not GOOGLE_PLACES_API_KEY:
+        raise HTTPException(400, "Google Places API key is not configured")
+    payload = {
+        "textQuery": f"{body.query} in {body.location}",
+        "maxResultCount": body.max_results,
+        "languageCode": "en",
+        "regionCode": "IN",
+    }
+    field_mask = ",".join([
+        "places.id", "places.displayName", "places.primaryType",
+        "places.primaryTypeDisplayName", "places.formattedAddress",
+        "places.internationalPhoneNumber", "places.websiteUri",
+        "places.googleMapsUri", "places.rating", "places.userRatingCount",
+        "places.businessStatus",
+    ])
+    try:
+        async with httpx.AsyncClient(timeout=25) as http:
+            response = await http.post(
+                "https://places.googleapis.com/v1/places:searchText",
+                headers={
+                    "X-Goog-Api-Key": GOOGLE_PLACES_API_KEY,
+                    "X-Goog-FieldMask": field_mask,
+                    "Content-Type": "application/json",
+                },
+                json=payload,
+            )
+        if response.status_code >= 400:
+            error = response.json().get("error", {}) if response.content else {}
+            logger.warning("Places API failed: %s %s", response.status_code, error.get("status", ""))
+            raise HTTPException(502, f"Google Places request failed: {error.get('message', 'check API and billing settings')}")
+        places = response.json().get("places", [])
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("Places search failed: %s", type(exc).__name__)
+        raise HTTPException(502, "Google Places connection failed")
+
+    now = datetime.now(timezone.utc)
+    results = []
+    for place in places:
+        place_id = place.get("id")
+        if not place_id:
+            continue
+        lead = {
+            "user_id": user["id"], "place_id": place_id,
+            "company_name": (place.get("displayName") or {}).get("text", "Unknown business"),
+            "industry": (place.get("primaryTypeDisplayName") or {}).get("text") or place.get("primaryType"),
+            "location": place.get("formattedAddress"),
+            "phone": place.get("internationalPhoneNumber"),
+            "website": place.get("websiteUri"),
+            "email": None, "contact_name": None, "contact_role": None,
+            "google_maps_url": place.get("googleMapsUri"),
+            "rating": place.get("rating"), "review_count": place.get("userRatingCount"),
+            "business_status": place.get("businessStatus"),
+            "source": "google_places", "source_urls": [u for u in [place.get("googleMapsUri"), place.get("websiteUri")] if u],
+            "email_verification_status": "not_found", "pipeline_stage": "researched",
+            "outreach_eligibility": "needs_public_contact", "do_not_contact": False,
+            "retrieved_at": now, "updated_at": now,
+        }
+        await db.leads.update_one(
+            {"user_id": user["id"], "place_id": place_id},
+            {"$set": lead, "$setOnInsert": {"id": str(uuid.uuid4()), "created_at": now}},
+            upsert=True,
+        )
+        saved = await db.leads.find_one({"user_id": user["id"], "place_id": place_id}, {"_id": 0})
+        results.append(saved)
+    await log_activity(user["id"], "research", f"Google Places found {len(results)} real businesses for: {body.query} in {body.location}", "lead")
+    return {"query": body.query, "location": body.location, "count": len(results), "leads": results}
+
+
+@api.get("/leads")
+async def list_live_leads(user: dict = Depends(current_user)):
+    return await db.leads.find({"user_id": user["id"]}, {"_id": 0}).sort("created_at", -1).to_list(500)
 
 
 # ============================================================
