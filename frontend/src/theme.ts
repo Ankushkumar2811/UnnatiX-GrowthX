@@ -34,12 +34,13 @@ export const theme = {
 };
 
 export const AGENT_META: Record<string, { name: string; role: string; accent: string }> = {
-  ceo: { name: 'Aurora', role: 'CEO AI', accent: '#FF4400' },
-  marketing: { name: 'Vega', role: 'Marketing AI', accent: '#FF7300' },
-  sales: { name: 'Atlas', role: 'Sales AI', accent: '#00E676' },
-  research: { name: 'Iris', role: 'Research AI', accent: '#00E5FF' },
-  developer: { name: 'Nova', role: 'Developer AI', accent: '#A78BFA' },
-  operations: { name: 'Orion', role: 'Operations AI', accent: '#FFC400' },
-  finance: { name: 'Sterling', role: 'Finance AI', accent: '#F59E0B' },
-  hr: { name: 'Sage', role: 'HR AI', accent: '#EC4899' },
+  ceo: { name: 'Shri Nath', role: 'CEO AI', accent: '#FF4400' },
+  marketing: { name: 'Harshita Gaur', role: 'Marketing AI', accent: '#FF7300' },
+  seo: { name: 'Ishaan Kapoor', role: 'SEO AI', accent: '#14B8A6' },
+  sales: { name: 'Arjun Mehta', role: 'Sales AI', accent: '#00E676' },
+  research: { name: 'Ananya Iyer', role: 'Research AI', accent: '#00E5FF' },
+  developer: { name: 'Rohan Verma', role: 'Developer AI', accent: '#A78BFA' },
+  operations: { name: 'Kavya Sharma', role: 'Operations AI', accent: '#FFC400' },
+  finance: { name: 'Vikram Shah', role: 'Finance AI', accent: '#F59E0B' },
+  hr: { name: 'Meera Joshi', role: 'HR AI', accent: '#EC4899' },
 };

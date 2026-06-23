@@ -123,7 +123,7 @@ export default function Admin() {
           <Ionicons name="card" size={20} color={theme.color.brand} />
           <View style={{ flex: 1, marginLeft: 12 }}>
             <Text style={s.billingTitle}>Billing · Free tier</Text>
-            <Text style={s.billingSub}>Unlimited goals · 8 AI employees · Claude Sonnet 4.5</Text>
+            <Text style={s.billingSub}>Unlimited goals · 9 AI employees · Claude Sonnet 4.5</Text>
           </View>
         </View>
       </ScrollView>

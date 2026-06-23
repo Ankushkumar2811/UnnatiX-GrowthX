@@ -44,7 +44,7 @@ export default function CEOPage() {
       <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={{ flex: 1 }}>
         <ScrollView contentContainerStyle={s.scroll} keyboardShouldPersistTaps="handled">
           <Text style={s.eyebrow}>CEO ORCHESTRATION</Text>
-          <Text style={s.h1}>Brief Aurora.</Text>
+          <Text style={s.h1}>Brief Shri Nath.</Text>
           <Text style={s.sub}>Drop a business objective. Your CEO AI will break it down and delegate across departments.</Text>
 
           <View style={s.inputWrap}>
@@ -70,7 +70,7 @@ export default function CEOPage() {
           {err && <Text style={s.err}>{err}</Text>}
 
           <Pressable testID="ceo-synthesize-button" style={[s.cta, busy && { opacity: 0.6 }]} onPress={submit} disabled={busy}>
-            {busy ? <><ActivityIndicator color="#fff" /><Text style={s.ctaText}>  Aurora is synthesizing…</Text></>
+            {busy ? <><ActivityIndicator color="#fff" /><Text style={s.ctaText}>  Shri Nath is synthesizing…</Text></>
               : <><Ionicons name="sparkles" size={18} color="#fff" /><Text style={s.ctaText}>Synthesize plan</Text></>}
           </Pressable>
 

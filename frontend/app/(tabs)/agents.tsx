@@ -30,7 +30,7 @@ export default function Agents() {
         <Text style={s.title}>Agents</Text>
       </View>
       <ScrollView contentContainerStyle={s.scroll} refreshControl={<RefreshControl tintColor={theme.color.brand} refreshing={refreshing} onRefresh={async () => { setRefreshing(true); await load(); setRefreshing(false); }} />}>
-        <Text style={s.intro}>Your 8 executive AI employees. Status updates in real-time as tasks flow through the system.</Text>
+        <Text style={s.intro}>Your 9 executive AI employees. Status updates in real-time as tasks flow through the system.</Text>
         <View style={s.grid}>
           {agents.map(a => (
             <View key={a.id} style={s.card} testID={`agent-card-${a.id}`}>

@@ -1,7 +1,7 @@
 # UnnatiX GrowthX — Product Requirements
 
 ## Vision
-A mobile AI Operating System where a single founder coordinates 8 specialized AI employees through a single dashboard. The CEO AI (Aurora) takes a high-level business objective, breaks it into delegated tasks across departments, and routes sensitive actions through founder approval.
+A mobile AI Operating System where a single founder coordinates 9 specialized AI employees through a single dashboard. The CEO AI (Shri Nath) takes a high-level business objective, breaks it into delegated tasks across departments, and routes sensitive actions through founder approval.
 
 ## Tech Stack
 - **Frontend:** Expo SDK 54 + expo-router (file-based routing, tabs)
@@ -11,8 +11,8 @@ A mobile AI Operating System where a single founder coordinates 8 specialized AI
 ## Core Features (MVP)
 1. **Auth** — Email + password (JWT), register + login screens.
 2. **Dashboard (Command)** — 8 live KPIs (agents, active/completed tasks, goals, approvals, reports, leads, content), system status hero, real-time activity feed.
-3. **CEO Orchestration** — Founder enters objective; Aurora calls Claude Sonnet 4.5 to break it into 5–8 tasks delegated across Marketing/Sales/Research/Developer/Operations/Finance/HR. Sensitive sales/outreach tasks auto-flag as requires_approval. Workflow timeline visualization.
-4. **Agents** — Grid of 8 AI employee cards (Aurora/Vega/Atlas/Iris/Nova/Orion/Sterling/Sage) with abstract geometric avatars, live status, current task, performance score.
+3. **CEO Orchestration** — Founder enters objective; Shri Nath calls the configured AI model to break it into 5–8 tasks delegated across Marketing/SEO/Sales/Research/Developer/Operations/Finance/HR. Sensitive sales/outreach tasks auto-flag as requires_approval. Workflow timeline visualization.
+4. **Agents** — Grid of 9 AI employee cards (Shri Nath/Harshita Gaur/Ishaan Kapoor/Arjun Mehta/Ananya Iyer/Rohan Verma/Kavya Sharma/Vikram Shah/Meera Joshi) with abstract geometric avatars, live status, current task, performance score.
 5. **Tasks** — Filterable list (All/Planning/Running/Awaiting/Completed) with priority dots, agent attribution, status badges, progress bars, manual advance action.
 6. **Approvals** — Founder approval queue for sensitive AI actions (approve/reject), history view.
 

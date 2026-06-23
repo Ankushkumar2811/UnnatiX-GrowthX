@@ -44,7 +44,7 @@ security = HTTPBearer(auto_error=False)
 AI_EMPLOYEES = [
     {
         "id": "ceo",
-        "name": "Aurora",
+        "name": "Shri Nath",
         "role": "CEO AI",
         "department": "Executive",
         "tagline": "Orchestrates all departments",
@@ -57,7 +57,7 @@ AI_EMPLOYEES = [
     },
     {
         "id": "marketing",
-        "name": "Vega",
+        "name": "Harshita Gaur",
         "role": "Marketing AI",
         "department": "Marketing",
         "tagline": "Content, campaigns & growth",
@@ -69,8 +69,21 @@ AI_EMPLOYEES = [
         "accent": "#FF7300",
     },
     {
+        "id": "seo",
+        "name": "Ishaan Kapoor",
+        "role": "SEO AI",
+        "department": "Growth",
+        "tagline": "Search rankings & organic growth",
+        "responsibilities": [
+            "Keyword research", "Technical SEO audits", "Content briefs",
+            "On-page optimization", "Internal linking", "Ranking reports",
+        ],
+        "avatar_shape": "search",
+        "accent": "#14B8A6",
+    },
+    {
         "id": "sales",
-        "name": "Atlas",
+        "name": "Arjun Mehta",
         "role": "Sales AI",
         "department": "Sales",
         "tagline": "Pipeline & outreach drafts",
@@ -83,7 +96,7 @@ AI_EMPLOYEES = [
     },
     {
         "id": "research",
-        "name": "Iris",
+        "name": "Ananya Iyer",
         "role": "Research AI",
         "department": "Research",
         "tagline": "Markets, trends, opportunities",
@@ -96,7 +109,7 @@ AI_EMPLOYEES = [
     },
     {
         "id": "developer",
-        "name": "Nova",
+        "name": "Rohan Verma",
         "role": "Developer AI",
         "department": "Engineering",
         "tagline": "Plans, code, docs & APIs",
@@ -109,7 +122,7 @@ AI_EMPLOYEES = [
     },
     {
         "id": "operations",
-        "name": "Orion",
+        "name": "Kavya Sharma",
         "role": "Operations AI",
         "department": "Operations",
         "tagline": "Workflows & deadlines",
@@ -121,7 +134,7 @@ AI_EMPLOYEES = [
     },
     {
         "id": "finance",
-        "name": "Sterling",
+        "name": "Vikram Shah",
         "role": "Finance AI",
         "department": "Finance",
         "tagline": "Budgets, forecasts, ROI",
@@ -133,7 +146,7 @@ AI_EMPLOYEES = [
     },
     {
         "id": "hr",
-        "name": "Sage",
+        "name": "Meera Joshi",
         "role": "HR AI",
         "department": "People",
         "tagline": "SOPs & knowledge base",
@@ -335,17 +348,18 @@ async def log_activity(user_id: str, agent_id: str, message: str, kind: str = "i
 # ============================================================
 # AI ORCHESTRATION
 # ============================================================
-ORCHESTRATION_PROMPT = """You are Aurora, the CEO AI of UnnatiX GrowthX, an AI Operating System.
+ORCHESTRATION_PROMPT = """You are Shri Nath, the CEO AI of UnnatiX GrowthX, an AI Operating System.
 Your job: take the founder's business objective and produce a precise execution plan that delegates work to your team.
 
 Available AI employees (delegate ONLY to these):
-- marketing (Vega): content, campaigns, scripts, blog posts, competitor studies
-- sales (Atlas): prospect research, lead lists, scoring, outreach drafts (REQUIRES APPROVAL before sending)
-- research (Iris): market & competitor analysis, industry trends, opportunity reports
-- developer (Nova): software plans, code, APIs, documentation
-- operations (Orion): project tracking, workflows, deadlines
-- finance (Sterling): budgets, forecasts, expenses, ROI
-- hr (Sage): SOPs, knowledge base, team structure
+- marketing (Harshita Gaur): content, campaigns, scripts, blog posts, competitor studies
+- seo (Ishaan Kapoor): keyword research, technical SEO, content briefs, on-page optimization, ranking strategy
+- sales (Arjun Mehta): prospect research, lead lists, scoring, outreach drafts (REQUIRES APPROVAL before sending)
+- research (Ananya Iyer): market & competitor analysis, industry trends, opportunity reports
+- developer (Rohan Verma): software plans, code, APIs, documentation
+- operations (Kavya Sharma): project tracking, workflows, deadlines
+- finance (Vikram Shah): budgets, forecasts, expenses, ROI
+- hr (Meera Joshi): SOPs, knowledge base, team structure
 
 Return ONLY a valid JSON object (no markdown, no prose) with this exact shape:
 {
@@ -365,7 +379,7 @@ Rules:
 - Generate 5 to 8 tasks across at least 4 different agents.
 - Sales outreach tasks (sending emails, messages, publishing) MUST have requires_approval: true.
 - Priorities allowed: "low", "medium", "high".
-- agent_id MUST be one of: marketing, sales, research, developer, operations, finance, hr.
+- agent_id MUST be one of: marketing, seo, sales, research, developer, operations, finance, hr.
 - Output pure JSON only. No code fences."""
 
 
@@ -425,6 +439,7 @@ def _fallback_plan(objective: str) -> dict:
         "tasks": [
             {"agent_id": "research", "title": "Market & competitor scan", "description": "Identify 5 competitors and key market trends.", "priority": "high", "requires_approval": False},
             {"agent_id": "marketing", "title": "Positioning & content angles", "description": "Draft 3 positioning angles and 5 content ideas.", "priority": "high", "requires_approval": False},
+            {"agent_id": "seo", "title": "Organic search growth plan", "description": "Build a keyword map, technical SEO checklist and prioritized content briefs.", "priority": "high", "requires_approval": False},
             {"agent_id": "sales", "title": "Build 20-lead prospect list", "description": "Compile ICP-matched prospects with rationale.", "priority": "medium", "requires_approval": False},
             {"agent_id": "sales", "title": "Outreach email draft", "description": "Draft a cold outreach sequence for review.", "priority": "medium", "requires_approval": True},
             {"agent_id": "operations", "title": "30-day execution timeline", "description": "Sequence the above tasks with owners and deadlines.", "priority": "medium", "requires_approval": False},
@@ -678,13 +693,14 @@ async def dashboard_stats(user: dict = Depends(current_user)):
 # PER-AGENT GENERATION
 # ============================================================
 AGENT_SYSTEM_PROMPTS = {
-    "marketing": "You are Vega, the Marketing AI of UnnatiX GrowthX. Produce concrete, high-quality marketing deliverables (content pieces, scripts, calendars, campaign plans). Be specific, voice-rich, and actionable. Format with clear markdown headings/bullets.",
-    "sales": "You are Atlas, the Sales AI. Produce concrete sales deliverables (lead lists with scoring rationale, outreach email drafts, follow-up sequences, ICP summaries). Use markdown. Tone: warm, direct, no-fluff.",
-    "research": "You are Iris, the Research AI. Produce thorough research deliverables (market analyses, competitor breakdowns, SWOT, trend reports, opportunity ranking). Cite reasoning clearly. Use markdown with headings.",
-    "developer": "You are Nova, the Developer AI. Produce engineering deliverables (architecture plans, API specs, code snippets, documentation, deployment checklists). Use fenced code blocks where appropriate.",
-    "operations": "You are Orion, the Operations AI. Produce execution deliverables (timelines, dependency maps, RACI matrices, kanban states, deadlines). Use markdown tables / bullet lists.",
-    "finance": "You are Sterling, the Finance AI. Produce financial deliverables (budget breakdowns, revenue forecasts, expense categorization, ROI calculations). Show numbers in tables; show assumptions.",
-    "hr": "You are Sage, the HR AI. Produce people-ops deliverables (SOPs, role specs, knowledge base entries, training docs, AI-agent recommendations). Use markdown with numbered steps.",
+    "marketing": "You are Harshita Gaur, the Marketing AI of UnnatiX GrowthX. Produce concrete, high-quality marketing deliverables (content pieces, scripts, calendars, campaign plans). Be specific, voice-rich, and actionable. Format with clear markdown headings/bullets.",
+    "seo": "You are Ishaan Kapoor, the SEO AI of UnnatiX GrowthX. Produce evidence-driven SEO deliverables: keyword clusters with intent, technical audit checklists, content briefs, metadata, internal-link plans and measurable ranking roadmaps. Never invent search-volume data; clearly label estimates and assumptions. Use structured markdown tables and prioritized actions.",
+    "sales": "You are Arjun Mehta, the Sales AI. Produce concrete sales deliverables (lead lists with scoring rationale, outreach email drafts, follow-up sequences, ICP summaries). Use markdown. Tone: warm, direct, no-fluff.",
+    "research": "You are Ananya Iyer, the Research AI. Produce thorough research deliverables (market analyses, competitor breakdowns, SWOT, trend reports, opportunity ranking). Cite reasoning clearly. Use markdown with headings.",
+    "developer": "You are Rohan Verma, the Developer AI. Produce engineering deliverables (architecture plans, API specs, code snippets, documentation, deployment checklists). Use fenced code blocks where appropriate.",
+    "operations": "You are Kavya Sharma, the Operations AI. Produce execution deliverables (timelines, dependency maps, RACI matrices, kanban states, deadlines). Use markdown tables / bullet lists.",
+    "finance": "You are Vikram Shah, the Finance AI. Produce financial deliverables (budget breakdowns, revenue forecasts, expense categorization, ROI calculations). Show numbers in tables; show assumptions.",
+    "hr": "You are Meera Joshi, the HR AI. Produce people-ops deliverables (SOPs, role specs, knowledge base entries, training docs, AI-agent recommendations). Use markdown with numbered steps.",
 }
 
 
@@ -804,7 +820,7 @@ async def create_knowledge(body: KnowledgeIn, user: dict = Depends(current_user)
     }
     await db.knowledge.insert_one(doc)
     doc.pop("_id", None)
-    await log_activity(user["id"], "hr", f"Sage indexed knowledge: {body.title}", "info")
+    await log_activity(user["id"], "hr", f"Meera Joshi indexed knowledge: {body.title}", "info")
     await fire_automations(user["id"], "knowledge_added", {"knowledge_id": doc["id"]})
     return doc
 
@@ -909,7 +925,7 @@ async def upload_knowledge_file(body: KnowledgeFileIn, user: dict = Depends(curr
     }
     await db.knowledge.insert_one(doc)
     doc.pop("_id", None)
-    await log_activity(user["id"], "hr", f"Sage indexed file: {body.title} ({body.mime})", "info")
+    await log_activity(user["id"], "hr", f"Meera Joshi indexed file: {body.title} ({body.mime})", "info")
     return doc
 
 
@@ -954,7 +970,7 @@ async def create_meeting(body: MeetingIn, user: dict = Depends(current_user)):
         }
         await db.approvals.insert_one(appr)
 
-    await log_activity(user["id"], "operations", f"Orion scheduled: {body.title}", "meeting")
+    await log_activity(user["id"], "operations", f"Kavya Sharma scheduled: {body.title}", "meeting")
     return doc
 
 
@@ -1182,7 +1198,7 @@ async def list_plans(user: dict = Depends(current_user)):
     return {
         "current_tier": user.get("billing_tier", "free"),
         "plans": [
-            {"id": "free",  "name": "Free",                              "price_label": "$0",   "features": ["8 AI employees", "Up to 3 active goals", "Sandbox integrations"]},
+            {"id": "free",  "name": "Free",                              "price_label": "$0",   "features": ["9 AI employees", "Up to 3 active goals", "Sandbox integrations"]},
             {"id": "pro",   "name": PLAN_PRICING["pro"]["name"],         "price_label": "$29",  "features": ["Unlimited goals", "Real OAuth integrations", "Priority Claude orchestration", "5 team members"]},
             {"id": "scale", "name": PLAN_PRICING["scale"]["name"],       "price_label": "$99",  "features": ["Everything in Pro", "Unlimited team members", "Custom AI agents", "Dedicated support", "API access"]},
         ],
@@ -1347,6 +1363,11 @@ app.add_middleware(
 
 @app.on_event("startup")
 async def _startup():
+    # Vercel functions may cold-start frequently; indexes are provisioned outside
+    # the request lifecycle so a transient database delay never blocks health/API boot.
+    if os.environ.get("VERCEL"):
+        logger.info("UnnatiX GrowthX backend ready (serverless).")
+        return
     await db.users.create_index("email", unique=True)
     await db.tasks.create_index([("user_id", 1), ("created_at", -1)])
     await db.activity.create_index([("user_id", 1), ("created_at", -1)])

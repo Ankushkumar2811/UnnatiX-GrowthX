@@ -46,7 +46,7 @@ export default function Automations() {
   };
   const remove = async (id: string) => { try { await api(`/automations/${id}`, { method: 'DELETE' }); load(); } catch {} };
 
-  const AGENT_IDS = ['marketing', 'sales', 'research', 'developer', 'operations', 'finance', 'hr'];
+  const AGENT_IDS = ['marketing', 'seo', 'sales', 'research', 'developer', 'operations', 'finance', 'hr'];
 
   return (
     <SafeAreaView style={s.safe} edges={['top']}>

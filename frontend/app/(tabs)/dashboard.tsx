@@ -53,7 +53,7 @@ export default function Dashboard() {
             <Text style={s.heroLabel}>SYSTEM OPERATIONAL</Text>
           </View>
           <Text style={s.heroValue}>{user?.organization || 'Your AI Company'}</Text>
-          <Text style={s.heroSub}>{stats?.total_agents ?? 8} AI employees on standby · {stats?.active_tasks ?? 0} tasks in motion</Text>
+          <Text style={s.heroSub}>{stats?.total_agents ?? 9} AI employees on standby · {stats?.active_tasks ?? 0} tasks in motion</Text>
 
           <Pressable testID="dashboard-launch-goal" style={s.heroCta} onPress={() => router.push('/(tabs)/ceo')}>
             <Ionicons name="sparkles" size={16} color="#fff" />
@@ -63,7 +63,7 @@ export default function Dashboard() {
 
         <Text style={s.section}>OPERATIONAL METRICS</Text>
         <View style={s.grid}>
-          <Stat icon="people" label="AI Employees" value={stats?.total_agents ?? 8} />
+          <Stat icon="people" label="AI Employees" value={stats?.total_agents ?? 9} />
           <Stat icon="pulse" label="Active Tasks" value={stats?.active_tasks ?? 0} accent={theme.color.brand} />
           <Stat icon="checkmark-done" label="Completed" value={stats?.completed_tasks ?? 0} accent={theme.color.success} />
           <Stat icon="rocket" label="Goals Running" value={stats?.goals_running ?? 0} />

@@ -10,6 +10,7 @@ import { api } from '@/src/api';
 type Task = { id: string; agent_id: string; title: string; description: string; priority: string; status: string; progress: number; requires_approval: boolean; output: string | null; created_at: string };
 
 const DEPT_META: Record<string, { eyebrow: string; sections: { id: string; label: string }[] }> = {
+  seo: { eyebrow: 'GROWTH · ORGANIC SEARCH', sections: [{ id: 'all', label: 'All Work' }, { id: 'running', label: 'Active' }, { id: 'completed', label: 'Delivered' }] },
   marketing: { eyebrow: 'MARKETING WORKSPACE', sections: [{ id: 'all', label: 'All' }, { id: 'content', label: 'Content' }, { id: 'campaigns', label: 'Campaigns' }] },
   sales:     { eyebrow: 'SALES WORKSPACE',     sections: [{ id: 'all', label: 'All' }, { id: 'leads', label: 'Leads' }, { id: 'outreach', label: 'Outreach drafts' }] },
   research:  { eyebrow: 'RESEARCH WORKSPACE',  sections: [{ id: 'all', label: 'All' }, { id: 'reports', label: 'Reports' }, { id: 'trends', label: 'Trends' }] },
@@ -119,7 +120,7 @@ export default function Workspace() {
           <View style={s.emptyCard}>
             <Ionicons name="folder-open-outline" size={36} color={theme.color.onSurfaceTertiary} />
             <Text style={s.emptyTitle}>No outputs yet</Text>
-            <Text style={s.emptySub}>Brief Aurora or add a quick task to put {meta.name} to work.</Text>
+            <Text style={s.emptySub}>Brief Shri Nath or add a quick task to put {meta.name} to work.</Text>
           </View>
         )}
 

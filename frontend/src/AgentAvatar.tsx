@@ -25,6 +25,14 @@ export function AgentAvatar({ agentId, accent, size = 56 }: { agentId: string; a
             ))}
           </View>
         );
+      case 'seo': // search target
+        return (
+          <>
+            <View style={{ width: s * 0.48, height: s * 0.48, borderRadius: s, borderWidth: 2, borderColor: accent }} />
+            <View style={{ position: 'absolute', width: s * 0.25, height: 3, backgroundColor: accent, transform: [{ rotate: '45deg' }], right: s * 0.13, bottom: s * 0.18, borderRadius: 2 }} />
+            <View style={{ position: 'absolute', width: s * 0.12, height: s * 0.12, borderRadius: s, backgroundColor: accent }} />
+          </>
+        );
       case 'sales': // spiral rings
         return (
           <>

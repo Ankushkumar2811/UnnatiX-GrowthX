@@ -57,7 +57,7 @@ export default function Tasks() {
         keyExtractor={t => t.id}
         contentContainerStyle={s.list}
         refreshControl={<RefreshControl tintColor={theme.color.brand} refreshing={refreshing} onRefresh={async () => { setRefreshing(true); await load(); setRefreshing(false); }} />}
-        ListEmptyComponent={<Text style={s.empty}>No tasks here. Brief Aurora to get to work.</Text>}
+        ListEmptyComponent={<Text style={s.empty}>No tasks here. Brief Shri Nath to get to work.</Text>}
         renderItem={({ item }) => {
           const meta = AGENT_META[item.agent_id] || { name: item.agent_id, role: '', accent: theme.color.onSurface };
           const status = item.status;
