@@ -1707,6 +1707,7 @@ async def create_meeting(body: MeetingIn, user: dict = Depends(current_user)):
     else:
         created = await _schedule_google_meeting(user["id"], doc)
         doc.update(created)
+        doc["status"] = "scheduled"
         await db.meetings.update_one({"id": doc["id"]}, {"$set": {**created, "status": "scheduled"}})
 
     await log_activity(user["id"], "operations", f"Kavya Sharma scheduled: {body.title}", "meeting")
