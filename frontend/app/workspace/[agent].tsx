@@ -12,7 +12,7 @@ type Task = { id: string; agent_id: string; title: string; description: string; 
 const DEPT_META: Record<string, { eyebrow: string; sections: { id: string; label: string }[] }> = {
   seo: { eyebrow: 'ORGANIC GROWTH · SEO', sections: [{ id: 'all', label: 'All Work' }, { id: 'running', label: 'Audits & Rankings' }, { id: 'completed', label: 'Delivered' }] },
   marketing: { eyebrow: 'CREATIVE MARKETING', sections: [{ id: 'all', label: 'All' }, { id: 'content', label: 'Social & Content' }, { id: 'campaigns', label: 'Campaigns' }] },
-  sales:     { eyebrow: 'BUSINESS DEVELOPMENT', sections: [{ id: 'all', label: 'All' }, { id: 'leads', label: 'Leads & Proposals' }, { id: 'outreach', label: 'Outreach drafts' }] },
+  sales:     { eyebrow: 'SALES GENERATION', sections: [{ id: 'all', label: 'Pipeline' }, { id: 'leads', label: 'Leads & Offers' }, { id: 'outreach', label: 'Pitch & Follow-ups' }] },
   research:  { eyebrow: 'STRATEGY & RESEARCH', sections: [{ id: 'all', label: 'All' }, { id: 'reports', label: 'Client Research' }, { id: 'trends', label: 'Trends & Ads' }] },
   developer: { eyebrow: 'WEB & APP DELIVERY', sections: [{ id: 'all', label: 'All' }, { id: 'projects', label: 'Sites & Apps' }, { id: 'docs', label: 'Tracking & Docs' }] },
   operations:{ eyebrow: 'CLIENT OPERATIONS', sections: [{ id: 'all', label: 'All' }, { id: 'planning', label: 'Onboarding' }, { id: 'running', label: 'In Delivery' }, { id: 'completed', label: 'Reported' }] },

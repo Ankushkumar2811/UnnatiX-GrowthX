@@ -34,6 +34,7 @@ export default function CEOPage() {
 
   const SUGGESTIONS = [
     'Win 10 new digital marketing clients in Delhi NCR',
+    'Build a ₹5 lakh sales pipeline with qualified prospects and proposals',
     'Build a 90-day SEO and content plan for a client',
     'Launch a Google and Meta Ads lead-generation campaign',
     'Create a website, social and performance marketing proposal',

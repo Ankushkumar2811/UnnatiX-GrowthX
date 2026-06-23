@@ -37,7 +37,7 @@ export const AGENT_META: Record<string, { name: string; role: string; accent: st
   ceo: { name: 'Shri Nath', role: 'Agency CEO AI', accent: '#FF4400' },
   marketing: { name: 'Harshita Gaur', role: 'Social & Content AI', accent: '#FF7300' },
   seo: { name: 'Ishaan Kapoor', role: 'SEO & Organic Growth AI', accent: '#14B8A6' },
-  sales: { name: 'Arjun Mehta', role: 'Business Development AI', accent: '#00E676' },
+  sales: { name: 'Arjun Mehta', role: 'Sales Generation AI', accent: '#00E676' },
   research: { name: 'Ananya Iyer', role: 'Market Intelligence AI', accent: '#00E5FF' },
   developer: { name: 'Rohan Verma', role: 'Web & App Development AI', accent: '#A78BFA' },
   operations: { name: 'Kavya Sharma', role: 'Client Operations AI', accent: '#FFC400' },

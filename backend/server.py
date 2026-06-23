@@ -10,6 +10,7 @@ from typing import List, Optional, Literal
 
 import bcrypt
 import certifi
+import httpx
 import jwt
 from fastapi import FastAPI, APIRouter, HTTPException, Depends, status, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -24,7 +25,17 @@ load_dotenv(ROOT_DIR / ".env")
 MONGO_URL = os.environ["MONGO_URL"]
 DB_NAME = os.environ["DB_NAME"]
 JWT_SECRET = os.environ["JWT_SECRET"]
-EMERGENT_LLM_KEY = os.environ.get("EMERGENT_LLM_KEY", "")
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-5.4")
+ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-6")
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+LLM_PROVIDER_ORDER = [
+    p.strip().lower()
+    for p in os.environ.get("LLM_PROVIDER_ORDER", "openai,anthropic,gemini").split(",")
+    if p.strip().lower() in {"openai", "anthropic", "gemini"}
+]
 JWT_ALG = "HS256"
 JWT_EXPIRE_HOURS = 24 * 7
 
@@ -90,12 +101,13 @@ AI_EMPLOYEES = [
     {
         "id": "sales",
         "name": "Arjun Mehta",
-        "role": "Business Development AI",
+        "role": "Sales Generation AI",
         "department": "Sales & Partnerships",
-        "tagline": "Qualified leads, proposals & follow-ups",
+        "tagline": "Leads, offers, pitches & revenue pipeline",
         "responsibilities": [
-            "Find Delhi NCR and global prospects", "Build and score lead lists",
-            "Draft service proposals", "Create outreach and follow-up sequences", "Maintain pipeline",
+            "Generate verified prospect lists", "Score leads by intent and fit",
+            "Build service offers and proposals", "Write personalized pitches and follow-ups",
+            "Handle objections and closing scripts", "Forecast sales pipeline and revenue",
         ],
         "avatar_shape": "spiral",
         "accent": "#00E676",
@@ -357,6 +369,137 @@ async def log_activity(user_id: str, agent_id: str, message: str, kind: str = "i
 # ============================================================
 # AI ORCHESTRATION
 # ============================================================
+def _clean_model_text(text: str) -> str:
+    text = text.strip()
+    if text.startswith("```"):
+        parts = text.split("```", 2)
+        text = parts[1] if len(parts) > 1 else text
+        if text.startswith("json"):
+            text = text[4:]
+        text = text.strip()
+    return text
+
+
+def _configured_llm_providers() -> List[str]:
+    keys = {
+        "openai": OPENAI_API_KEY,
+        "anthropic": ANTHROPIC_API_KEY,
+        "gemini": GEMINI_API_KEY,
+    }
+    return [provider for provider in LLM_PROVIDER_ORDER if keys.get(provider)]
+
+
+async def _call_openai(system_prompt: str, user_prompt: str) -> str:
+    payload = {
+        "model": OPENAI_MODEL,
+        "instructions": system_prompt,
+        "input": user_prompt,
+        "max_output_tokens": 2400,
+    }
+    async with httpx.AsyncClient(timeout=45.0) as http:
+        response = await http.post(
+            "https://api.openai.com/v1/responses",
+            headers={"Authorization": f"Bearer {OPENAI_API_KEY}"},
+            json=payload,
+        )
+        response.raise_for_status()
+        data = response.json()
+
+    if isinstance(data.get("output_text"), str) and data["output_text"].strip():
+        return data["output_text"]
+    chunks = []
+    for item in data.get("output", []):
+        for content in item.get("content", []):
+            if content.get("type") == "output_text" and content.get("text"):
+                chunks.append(content["text"])
+    if not chunks:
+        raise ValueError("OpenAI returned no output text")
+    return "\n".join(chunks)
+
+
+async def _call_anthropic(system_prompt: str, user_prompt: str) -> str:
+    payload = {
+        "model": ANTHROPIC_MODEL,
+        "max_tokens": 2400,
+        "system": system_prompt,
+        "messages": [{"role": "user", "content": user_prompt}],
+    }
+    async with httpx.AsyncClient(timeout=45.0) as http:
+        response = await http.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={
+                "x-api-key": ANTHROPIC_API_KEY,
+                "anthropic-version": "2023-06-01",
+            },
+            json=payload,
+        )
+        response.raise_for_status()
+        data = response.json()
+
+    chunks = [block.get("text", "") for block in data.get("content", []) if block.get("type") == "text"]
+    text = "\n".join(chunk for chunk in chunks if chunk)
+    if not text:
+        raise ValueError("Anthropic returned no output text")
+    return text
+
+
+async def _call_gemini(system_prompt: str, user_prompt: str) -> str:
+    payload = {
+        "systemInstruction": {"parts": [{"text": system_prompt}]},
+        "contents": [{"role": "user", "parts": [{"text": user_prompt}]}],
+        "generationConfig": {"maxOutputTokens": 2400},
+    }
+    async with httpx.AsyncClient(timeout=45.0) as http:
+        response = await http.post(
+            f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent",
+            headers={"x-goog-api-key": GEMINI_API_KEY},
+            json=payload,
+        )
+        response.raise_for_status()
+        data = response.json()
+
+    candidates = data.get("candidates", [])
+    if not candidates:
+        raise ValueError("Gemini returned no candidates")
+    parts = candidates[0].get("content", {}).get("parts", [])
+    text = "\n".join(part.get("text", "") for part in parts if part.get("text"))
+    if not text:
+        raise ValueError("Gemini returned no output text")
+    return text
+
+
+async def llm_complete(system_prompt: str, user_prompt: str, expect_json: bool = False) -> str:
+    providers = _configured_llm_providers()
+    if not providers:
+        raise HTTPException(
+            status_code=503,
+            detail="No AI provider configured. Add an OpenAI, Anthropic, or Gemini API key.",
+        )
+
+    callers = {
+        "openai": _call_openai,
+        "anthropic": _call_anthropic,
+        "gemini": _call_gemini,
+    }
+    failures = []
+    for provider in providers:
+        try:
+            raw = await callers[provider](system_prompt, user_prompt)
+            cleaned = _clean_model_text(raw)
+            if expect_json:
+                json.loads(cleaned)
+            logger.info("LLM request completed via %s", provider)
+            return cleaned
+        except Exception as exc:
+            failures.append(provider)
+            logger.warning("LLM provider %s failed: %s", provider, type(exc).__name__)
+
+    raise HTTPException(
+        status_code=502,
+        detail=f"All configured AI providers failed: {', '.join(failures)}",
+    )
+
+
 ORCHESTRATION_PROMPT = """You are Shri Nath, the CEO AI of UnnatiX Technologies, a Delhi NCR digital marketing and technology agency.
 The agency delivers SEO, social media marketing, Google/Meta/LinkedIn ads, branding, content, WhatsApp/email marketing, websites, apps, e-commerce management and performance analytics.
 Your job: turn the founder's or client's objective into a precise, measurable agency execution plan and delegate it to your team.
@@ -364,7 +507,7 @@ Your job: turn the founder's or client's objective into a precise, measurable ag
 Available AI employees (delegate ONLY to these):
 - marketing (Harshita Gaur): social calendars, campaign concepts, ad/reel scripts, branding, influencer and messaging content
 - seo (Ishaan Kapoor): keyword strategy, technical/local SEO, content briefs, on-page work, links and ranking reports
-- sales (Arjun Mehta): agency prospects, lead scoring, proposals and outreach drafts (REQUIRES APPROVAL before sending)
+- sales (Arjun Mehta): verified agency prospects, lead scoring, offers, proposals, pitches, objection handling, follow-ups and revenue pipeline (REQUIRES APPROVAL before sending)
 - research (Ananya Iyer): client markets, audiences, competitors, ad libraries and platform trends
 - developer (Rohan Verma): websites, landing pages, apps, analytics pixels, technical SEO fixes and automations
 - operations (Kavya Sharma): client onboarding, campaign workflows, deadlines, deliverables and reporting cadence
@@ -389,6 +532,7 @@ Rules:
 - Generate 5 to 8 tasks across at least 4 different agents.
 - Every task must name a concrete agency deliverable, owner outcome and measurable success signal.
 - Prefer INR for budgets unless the objective explicitly uses another currency.
+- Sales work must include ICP, qualification criteria, offer, next action and pipeline value; never fabricate contact details or claim a sale happened.
 - Sales outreach tasks (sending emails, messages, publishing) MUST have requires_approval: true.
 - Priorities allowed: "low", "medium", "high".
 - agent_id MUST be one of: marketing, seo, sales, research, developer, operations, finance, hr.
@@ -396,31 +540,13 @@ Rules:
 
 
 async def llm_orchestrate(objective: str) -> dict:
-    """Use Claude Sonnet 4.5 via emergentintegrations to break the goal down."""
-    from emergentintegrations.llm.chat import LlmChat, UserMessage
-
-    chat = LlmChat(
-        api_key=EMERGENT_LLM_KEY,
-        session_id=f"orch-{uuid.uuid4()}",
-        system_message=ORCHESTRATION_PROMPT,
-    ).with_model("anthropic", "claude-sonnet-4-5-20250929")
-
-    raw = await chat.send_message(UserMessage(text=f"Business objective: {objective}"))
-    text = raw if isinstance(raw, str) else str(raw)
-    # Strip code fences if model added them
-    text = text.strip()
-    if text.startswith("```"):
-        text = text.split("```", 2)[1]
-        if text.startswith("json"):
-            text = text[4:]
-        text = text.strip()
-        if text.endswith("```"):
-            text = text[:-3].strip()
-    try:
-        plan = json.loads(text)
-    except json.JSONDecodeError:
-        logger.warning(f"LLM returned non-JSON, using fallback. Raw: {text[:200]}")
-        plan = _fallback_plan(objective)
+    """Build an execution plan through the configured provider failover chain."""
+    text = await llm_complete(
+        ORCHESTRATION_PROMPT,
+        f"Business objective: {objective}",
+        expect_json=True,
+    )
+    plan = json.loads(text)
     return _validate_plan(plan, objective)
 
 
@@ -529,19 +655,12 @@ async def list_agents(user: dict = Depends(current_user)):
 # ============================================================
 @api.post("/goals", response_model=GoalOut)
 async def create_goal(body: GoalIn, user: dict = Depends(current_user)):
-    if not EMERGENT_LLM_KEY:
-        raise HTTPException(status_code=503, detail="LLM key not configured")
-
     goal_id = str(uuid.uuid4())
     now = datetime.now(timezone.utc)
 
     await log_activity(user["id"], "ceo", f"Received objective: {body.objective[:80]}", "goal")
 
-    try:
-        plan = await llm_orchestrate(body.objective)
-    except Exception as e:
-        logger.error(f"Orchestration failed: {e}")
-        plan = _fallback_plan(body.objective)
+    plan = await llm_orchestrate(body.objective)
 
     goal_doc = {
         "id": goal_id,
@@ -708,7 +827,7 @@ async def dashboard_stats(user: dict = Depends(current_user)):
 AGENT_SYSTEM_PROMPTS = {
     "marketing": "You are Harshita Gaur, Social & Content AI at UnnatiX Technologies. Create channel-specific social calendars, campaign concepts, reel/ad scripts, branding briefs, influencer plans and WhatsApp/email content. Tie every deliverable to audience, CTA and measurable engagement or conversion goals.",
     "seo": "You are Ishaan Kapoor, SEO & Organic Growth AI at UnnatiX Technologies. Produce keyword clusters with intent, local and technical audits, content briefs, metadata, backlink/internal-link plans and ranking roadmaps. Never invent search volume; label estimates and assumptions. Prioritize actions by impact and effort.",
-    "sales": "You are Arjun Mehta, Business Development AI at UnnatiX Technologies. Build agency ICPs, qualified lead lists, opportunity scoring, outcome-led service proposals and personalized email/LinkedIn/WhatsApp follow-ups. Never claim outreach was sent; outbound drafts require founder approval.",
+    "sales": "You are Arjun Mehta, Sales Generation AI at UnnatiX Technologies. Your goal is to create a practical path to revenue: define the ICP, produce source-backed prospect lists, score fit and buying intent, design outcome-led service packages, draft proposals and personalized email/LinkedIn/WhatsApp pitches, answer objections, create follow-up and closing scripts, and maintain a pipeline with stage, probability, next action and INR value. Never invent contact details, meetings, replies or closed sales. Clearly mark unverified data. Outbound actions require founder approval.",
     "research": "You are Ananya Iyer, Market Intelligence AI at UnnatiX Technologies. Research client industries, customer segments, competitors, pricing, ad libraries and platform trends. Separate verified facts from assumptions and turn findings into campaign opportunities.",
     "developer": "You are Rohan Verma, Web & App Development AI at UnnatiX Technologies. Produce website, landing-page and app plans, conversion improvements, analytics/pixel specifications, technical SEO fixes, APIs, automations, code and deployment checklists.",
     "operations": "You are Kavya Sharma, Client Operations AI at UnnatiX Technologies. Produce onboarding checklists, campaign timelines, dependency maps, owners, review cycles, reporting cadence and client-ready status updates. Surface blockers early.",
@@ -718,28 +837,19 @@ AGENT_SYSTEM_PROMPTS = {
 
 
 async def llm_generate_output(agent_id: str, task: dict, knowledge: List[dict]) -> str:
-    """Call Claude to produce the actual deliverable for a task."""
-    from emergentintegrations.llm.chat import LlmChat, UserMessage
-
+    """Produce a task deliverable through the configured provider failover chain."""
     sys_prompt = AGENT_SYSTEM_PROMPTS.get(agent_id, AGENT_SYSTEM_PROMPTS["operations"])
     if knowledge:
         ctx_lines = "\n".join(f"- {k['title']}: {(k.get('content') or '')[:280]}" for k in knowledge[:5])
         sys_prompt += f"\n\nBUSINESS CONTEXT (from founder's knowledge base):\n{ctx_lines}"
 
-    chat = LlmChat(
-        api_key=EMERGENT_LLM_KEY,
-        session_id=f"gen-{task['id']}",
-        system_message=sys_prompt,
-    ).with_model("anthropic", "claude-sonnet-4-5-20250929")
-
-    user = (
+    user_prompt = (
         f"Task: {task['title']}\n"
         f"Brief: {task['description']}\n\n"
         f"Produce the deliverable now. Output the deliverable directly — no preamble like 'here is the...'. "
         f"Keep it concise but complete (under ~500 words)."
     )
-    raw = await chat.send_message(UserMessage(text=user))
-    return raw if isinstance(raw, str) else str(raw)
+    return await llm_complete(sys_prompt, user_prompt)
 
 
 @api.post("/tasks/{task_id}/generate")
@@ -754,6 +864,8 @@ async def generate_task_output(task_id: str, user: dict = Depends(current_user))
 
     try:
         output = await llm_generate_output(task["agent_id"], task, knowledge)
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Generation failed: {e}")
         raise HTTPException(502, "AI generation failed — try again")
