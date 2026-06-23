@@ -242,7 +242,7 @@ class AuthOut(BaseModel):
 
 
 class GoalIn(BaseModel):
-    objective: str = Field(min_length=4, max_length=500)
+    objective: str = Field(min_length=4)
 
 
 class Task(BaseModel):
