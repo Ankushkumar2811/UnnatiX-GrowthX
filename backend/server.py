@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import List, Optional, Literal
 
 import bcrypt
+import certifi
 import jwt
 from fastapi import FastAPI, APIRouter, HTTPException, Depends, status, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -27,7 +28,12 @@ EMERGENT_LLM_KEY = os.environ.get("EMERGENT_LLM_KEY", "")
 JWT_ALG = "HS256"
 JWT_EXPIRE_HOURS = 24 * 7
 
-client = AsyncIOMotorClient(MONGO_URL)
+client = AsyncIOMotorClient(
+    MONGO_URL,
+    tlsCAFile=certifi.where(),
+    serverSelectionTimeoutMS=10000,
+    connectTimeoutMS=10000,
+)
 db = client[DB_NAME]
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
