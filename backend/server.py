@@ -1160,7 +1160,10 @@ async def _google_access_token(user_id: str) -> str:
     rec = await db.integrations.find_one({"user_id": user_id, "id": "google_workspace"}, {"_id": 0})
     if not rec or rec.get("status") != "connected_live":
         raise HTTPException(400, "Connect Google Workspace first")
-    if rec.get("access_token_enc") and rec.get("token_expires_at") and rec["token_expires_at"] > datetime.now(timezone.utc) + timedelta(minutes=2):
+    expires_at = rec.get("token_expires_at")
+    if expires_at and expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    if rec.get("access_token_enc") and expires_at and expires_at > datetime.now(timezone.utc) + timedelta(minutes=2):
         return _decrypt_secret(rec["access_token_enc"])
     refresh_token = _decrypt_secret(rec.get("refresh_token_enc", ""))
     async with httpx.AsyncClient(timeout=20) as http:
@@ -1685,7 +1688,7 @@ async def create_meeting(body: MeetingIn, user: dict = Depends(current_user)):
         "description": body.description,
         "meet_link": None,
         "provider": "google_calendar",
-        "status": "pending_approval" if body.requires_approval else "scheduled",
+        "status": "pending_approval" if body.requires_approval else "scheduling",
         "created_at": now,
     }
     await db.meetings.insert_one(doc)
