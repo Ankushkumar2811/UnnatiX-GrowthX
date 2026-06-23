@@ -9,3 +9,4 @@ email-validator==2.3.0
 stripe==14.4.1
 pypdf==6.13.3
 httpx==0.28.1
+cryptography==45.0.7

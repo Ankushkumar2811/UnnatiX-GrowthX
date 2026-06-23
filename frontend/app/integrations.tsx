@@ -1,5 +1,5 @@
 import { useCallback, useState } from 'react';
-import { View, Text, StyleSheet, ScrollView, Pressable, ActivityIndicator } from 'react-native';
+import { View, Text, StyleSheet, ScrollView, Pressable, ActivityIndicator, Linking } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter, useFocusEffect } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
@@ -8,7 +8,7 @@ import { api } from '@/src/api';
 
 type Integration = { id: string; name: string; category: string; description: string; status: string; mode: string };
 
-const ICONS: Record<string, any> = { smtp: 'mail', gmail: 'mail', slack: 'chatbubbles', hubspot: 'people-circle', calendar: 'calendar', notion: 'document-text' };
+const ICONS: Record<string, any> = { smtp: 'mail', google_workspace: 'logo-google', gmail: 'mail', slack: 'chatbubbles', hubspot: 'people-circle', calendar: 'calendar', notion: 'document-text' };
 
 export default function Integrations() {
   const router = useRouter();
@@ -23,6 +23,11 @@ export default function Integrations() {
   const toggle = async (i: Integration) => {
     setBusy(i.id);
     try {
+      if (i.id === 'google_workspace' && i.status === 'not_configured') {
+        const result = await api<{ auth_url: string }>('/integrations/google/start');
+        await Linking.openURL(result.auth_url);
+        return;
+      }
       const enabled = i.status === 'not_configured';
       await api(`/integrations/${i.id}/toggle`, { method: 'POST', body: { enabled } });
       await load();
@@ -69,7 +74,7 @@ export default function Integrations() {
                   </View>
                   <Pressable testID={`integration-toggle-${i.id}`} onPress={() => toggle(i)} disabled={busy === i.id} style={[s.btn, connected && s.btnDisconnect]}>
                     {busy === i.id ? <ActivityIndicator size="small" color={connected ? theme.color.error : '#fff'} />
-                      : <Text style={[s.btnText, connected && { color: theme.color.error }]}>{connected ? 'Disconnect' : i.id === 'smtp' ? 'Connect live' : 'Connect sandbox'}</Text>}
+                      : <Text style={[s.btnText, connected && { color: theme.color.error }]}>{connected ? 'Disconnect' : ['smtp','google_workspace'].includes(i.id) ? 'Connect live' : 'Connect sandbox'}</Text>}
                   </Pressable>
                 </View>
               </View>

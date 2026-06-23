@@ -79,7 +79,7 @@ export default function Meetings() {
         <Text style={s.title}>Meetings & Calls</Text>
         <View style={s.sandboxBanner} testID="meetings-sandbox-banner">
           <Ionicons name="warning" size={14} color={theme.color.warning} />
-          <Text style={s.sandboxText}>Google Meet links are SANDBOX · MOCKED until you share Google credentials.</Text>
+          <Text style={s.sandboxText}>Google Workspace creates genuine Calendar events and Meet links. Connect it under Integrations before scheduling.</Text>
         </View>
 
         {items.length === 0 && (

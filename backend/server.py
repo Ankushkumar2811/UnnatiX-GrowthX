@@ -9,6 +9,8 @@ import ssl
 import re
 import socket
 import ipaddress
+import hashlib
+import base64
 from email.message import EmailMessage
 from email.utils import formataddr, make_msgid
 from urllib.parse import urljoin, urlparse
@@ -23,10 +25,12 @@ import httpx
 import jwt
 from fastapi import FastAPI, APIRouter, HTTPException, Depends, status, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi.responses import RedirectResponse
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, Field, EmailStr
+from cryptography.fernet import Fernet, InvalidToken
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / ".env")
@@ -49,6 +53,10 @@ SMTP_FROM_NAME = os.environ.get("SMTP_FROM_NAME", "UnnatiX Technologies")
 SMTP_SECURITY = os.environ.get("SMTP_SECURITY", "starttls").lower()
 GOOGLE_PLACES_API_KEY = os.environ.get("GOOGLE_PLACES_API_KEY", "")
 HUNTER_API_KEY = os.environ.get("HUNTER_API_KEY", "")
+GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID", "")
+GOOGLE_CLIENT_SECRET = os.environ.get("GOOGLE_CLIENT_SECRET", "")
+GOOGLE_REDIRECT_URI = os.environ.get("GOOGLE_REDIRECT_URI", "https://backend-zeta-seven-97.vercel.app/api/integrations/google/callback")
+GOOGLE_OAUTH_ENCRYPTION_KEY = os.environ.get("GOOGLE_OAUTH_ENCRYPTION_KEY", "") or JWT_SECRET
 LLM_PROVIDER_ORDER = [
     p.strip().lower()
     for p in os.environ.get("LLM_PROVIDER_ORDER", "openai,anthropic,gemini").split(",")
@@ -841,7 +849,14 @@ async def decide_approval(approval_id: str, body: ApprovalDecisionIn, user: dict
     verb = "approved" if body.decision == "approved" else "rejected"
     await log_activity(user["id"], appr["agent_id"], f"Founder {verb}: {appr['action']}", "approval")
     if body.decision == "approved":
-        await fire_automations(user["id"], "approval_approved", {"approval_id": approval_id, "task_id": appr["task_id"]})
+        meeting = await db.meetings.find_one({"id": appr["task_id"], "user_id": user["id"]}, {"_id": 0})
+        if meeting:
+            created = await _schedule_google_meeting(user["id"], meeting)
+            await db.meetings.update_one({"id": meeting["id"]}, {"$set": {**created, "status": "scheduled"}})
+        else:
+            await fire_automations(user["id"], "approval_approved", {"approval_id": approval_id, "task_id": appr["task_id"]})
+    else:
+        await db.meetings.update_one({"id": appr["task_id"], "user_id": user["id"]}, {"$set": {"status": "cancelled"}})
     return {"ok": True}
 
 
@@ -1114,11 +1129,61 @@ async def smtp_send(to_email: str, subject: str, text_body: str) -> str:
     return await asyncio.to_thread(_smtp_send_sync, to_email, subject, text_body)
 
 
+def _google_oauth_configured() -> bool:
+    return bool(GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET and GOOGLE_REDIRECT_URI)
+
+
+def _oauth_cipher() -> Fernet:
+    digest = hashlib.sha256(GOOGLE_OAUTH_ENCRYPTION_KEY.encode()).digest()
+    return Fernet(base64.urlsafe_b64encode(digest))
+
+
+def _encrypt_secret(value: str) -> str:
+    return _oauth_cipher().encrypt(value.encode()).decode()
+
+
+def _decrypt_secret(value: str) -> str:
+    try:
+        return _oauth_cipher().decrypt(value.encode()).decode()
+    except InvalidToken:
+        raise HTTPException(500, "Stored Google credential cannot be decrypted")
+
+
+GOOGLE_SCOPES = [
+    "openid", "email",
+    "https://www.googleapis.com/auth/gmail.readonly",
+    "https://www.googleapis.com/auth/calendar.events",
+]
+
+
+async def _google_access_token(user_id: str) -> str:
+    rec = await db.integrations.find_one({"user_id": user_id, "id": "google_workspace"}, {"_id": 0})
+    if not rec or rec.get("status") != "connected_live":
+        raise HTTPException(400, "Connect Google Workspace first")
+    if rec.get("access_token_enc") and rec.get("token_expires_at") and rec["token_expires_at"] > datetime.now(timezone.utc) + timedelta(minutes=2):
+        return _decrypt_secret(rec["access_token_enc"])
+    refresh_token = _decrypt_secret(rec.get("refresh_token_enc", ""))
+    async with httpx.AsyncClient(timeout=20) as http:
+        response = await http.post("https://oauth2.googleapis.com/token", data={
+            "client_id": GOOGLE_CLIENT_ID, "client_secret": GOOGLE_CLIENT_SECRET,
+            "refresh_token": refresh_token, "grant_type": "refresh_token",
+        })
+    if response.status_code >= 400:
+        raise HTTPException(502, "Google token refresh failed; reconnect Google Workspace")
+    token = response.json()
+    access_token = token["access_token"]
+    await db.integrations.update_one({"user_id": user_id, "id": "google_workspace"}, {"$set": {
+        "access_token_enc": _encrypt_secret(access_token),
+        "token_expires_at": datetime.now(timezone.utc) + timedelta(seconds=int(token.get("expires_in", 3600))),
+    }})
+    return access_token
+
+
 INTEGRATION_CATALOG = [
     {"id": "smtp", "name": "SMTP Email", "category": "Email", "description": "Send real approved outreach and notifications from your company inbox.", "requires_keys": ["SMTP host, user and app password"]},
+    {"id": "google_workspace", "name": "Google Workspace", "category": "Email + Calendar", "description": "Read replies and create real Calendar events with Google Meet.", "requires_keys": ["OAuth client ID and secret"]},
     {"id": "slack", "name": "Slack", "category": "Messaging", "description": "Post approvals & summaries to your team channel.", "requires_keys": ["Bot User OAuth Token"]},
     {"id": "hubspot", "name": "HubSpot", "category": "CRM", "description": "Sync Sales leads & pipeline stages.", "requires_keys": ["Private app access token"]},
-    {"id": "calendar", "name": "Google Calendar", "category": "Calendar", "description": "Schedule meetings post-approval.", "requires_keys": ["OAuth client + refresh token"]},
     {"id": "notion", "name": "Notion", "category": "Docs", "description": "Mirror Research reports & SOPs to a workspace.", "requires_keys": ["Internal integration token"]},
 ]
 
@@ -1130,13 +1195,112 @@ async def list_integrations(user: dict = Depends(current_user)):
     for cat in INTEGRATION_CATALOG:
         rec = existing.get(cat["id"], {})
         is_live_smtp = cat["id"] == "smtp" and _smtp_configured() and rec.get("status") != "not_configured"
+        is_live = is_live_smtp or rec.get("status") == "connected_live"
         out.append({
             **cat,
-            "status": "connected_live" if is_live_smtp else rec.get("status", "not_configured"),
-            "mode": "live" if is_live_smtp else "sandbox",
+            "status": "connected_live" if is_live else rec.get("status", "not_configured"),
+            "mode": "live" if is_live else "sandbox",
             "configured_at": rec.get("configured_at"),
         })
     return out
+
+
+@api.get("/integrations/google/start")
+async def start_google_oauth(user: dict = Depends(current_user)):
+    if not _google_oauth_configured():
+        raise HTTPException(400, "Google OAuth environment variables are incomplete")
+    state = jwt.encode({
+        "sub": user["id"], "purpose": "google_oauth",
+        "nonce": str(uuid.uuid4()), "exp": datetime.now(timezone.utc) + timedelta(minutes=10),
+    }, JWT_SECRET, algorithm=JWT_ALG)
+    params = {
+        "client_id": GOOGLE_CLIENT_ID, "redirect_uri": GOOGLE_REDIRECT_URI,
+        "response_type": "code", "scope": " ".join(GOOGLE_SCOPES),
+        "access_type": "offline", "prompt": "consent", "include_granted_scopes": "true",
+        "state": state,
+    }
+    return {"auth_url": str(httpx.URL("https://accounts.google.com/o/oauth2/v2/auth", params=params))}
+
+
+@api.get("/integrations/google/callback")
+async def google_oauth_callback(code: str, state: str):
+    try:
+        claims = jwt.decode(state, JWT_SECRET, algorithms=[JWT_ALG])
+        if claims.get("purpose") != "google_oauth":
+            raise ValueError("invalid purpose")
+        user_id = claims["sub"]
+    except Exception:
+        raise HTTPException(400, "Invalid or expired Google OAuth state")
+    async with httpx.AsyncClient(timeout=25) as http:
+        response = await http.post("https://oauth2.googleapis.com/token", data={
+            "code": code, "client_id": GOOGLE_CLIENT_ID, "client_secret": GOOGLE_CLIENT_SECRET,
+            "redirect_uri": GOOGLE_REDIRECT_URI, "grant_type": "authorization_code",
+        })
+        if response.status_code >= 400:
+            logger.warning("Google OAuth exchange failed: %s", response.status_code)
+            raise HTTPException(502, "Google OAuth token exchange failed")
+        token = response.json()
+        profile_response = await http.get("https://openidconnect.googleapis.com/v1/userinfo", headers={
+            "Authorization": f"Bearer {token['access_token']}"
+        })
+    profile = profile_response.json() if profile_response.status_code < 400 else {}
+    existing = await db.integrations.find_one({"user_id": user_id, "id": "google_workspace"}, {"_id": 0}) or {}
+    refresh = token.get("refresh_token")
+    update = {
+        "user_id": user_id, "id": "google_workspace", "status": "connected_live",
+        "google_email": profile.get("email"), "scopes": token.get("scope", "").split(),
+        "access_token_enc": _encrypt_secret(token["access_token"]),
+        "token_expires_at": datetime.now(timezone.utc) + timedelta(seconds=int(token.get("expires_in", 3600))),
+        "configured_at": datetime.now(timezone.utc),
+    }
+    if refresh:
+        update["refresh_token_enc"] = _encrypt_secret(refresh)
+    elif existing.get("refresh_token_enc"):
+        update["refresh_token_enc"] = existing["refresh_token_enc"]
+    else:
+        raise HTTPException(502, "Google did not return a refresh token; reconnect and grant consent")
+    await db.integrations.update_one({"user_id": user_id, "id": "google_workspace"}, {"$set": update}, upsert=True)
+    await log_activity(user_id, "operations", f"Google Workspace connected for {profile.get('email', 'account')}", "integration")
+    return RedirectResponse(f"{os.environ.get('APP_BASE_URL', 'https://frontend-black-six-9a2u5f36zm.vercel.app')}/integrations?google=connected")
+
+
+@api.post("/integrations/google/sync-replies")
+async def sync_google_replies(user: dict = Depends(current_user)):
+    access_token = await _google_access_token(user["id"])
+    headers = {"Authorization": f"Bearer {access_token}"}
+    async with httpx.AsyncClient(timeout=25, headers=headers) as http:
+        listing = await http.get("https://gmail.googleapis.com/gmail/v1/users/me/messages", params={
+            "q": "in:inbox newer_than:30d", "maxResults": 25,
+        })
+        if listing.status_code >= 400:
+            raise HTTPException(502, "Gmail reply sync failed")
+        message_refs = (listing.json().get("messages") or [])[:25]
+        synced = 0
+        for ref in message_refs:
+            response = await http.get(
+                f"https://gmail.googleapis.com/gmail/v1/users/me/messages/{ref['id']}",
+                params={"format": "metadata", "metadataHeaders": ["From", "To", "Subject", "Message-ID", "In-Reply-To"]},
+            )
+            if response.status_code >= 400:
+                continue
+            data = response.json()
+            raw_headers = ((data.get("payload") or {}).get("headers") or [])
+            metadata = {h.get("name", "").lower(): h.get("value") for h in raw_headers}
+            doc = {
+                "user_id": user["id"], "gmail_message_id": data["id"], "thread_id": data.get("threadId"),
+                "from": metadata.get("from"), "to": metadata.get("to"), "subject": metadata.get("subject"),
+                "message_id": metadata.get("message-id"), "in_reply_to": metadata.get("in-reply-to"),
+                "snippet": data.get("snippet"), "received_at": datetime.fromtimestamp(int(data.get("internalDate", "0")) / 1000, tz=timezone.utc),
+                "synced_at": datetime.now(timezone.utc),
+            }
+            await db.email_replies.update_one(
+                {"user_id": user["id"], "gmail_message_id": data["id"]},
+                {"$set": doc, "$setOnInsert": {"id": str(uuid.uuid4()), "created_at": datetime.now(timezone.utc)}},
+                upsert=True,
+            )
+            synced += 1
+    await log_activity(user["id"], "sales", f"Gmail synced {synced} recent inbox messages", "integration")
+    return {"ok": True, "synced": synced}
 
 
 @api.post("/integrations/{provider}/toggle")
@@ -1145,6 +1309,8 @@ async def toggle_integration(provider: str, body: IntegrationToggleIn, user: dic
         raise HTTPException(404, "Unknown integration")
     if provider == "smtp" and body.enabled and not _smtp_configured():
         raise HTTPException(400, "SMTP environment variables are incomplete")
+    if provider == "google_workspace" and body.enabled:
+        raise HTTPException(400, "Use Google OAuth Connect")
     status_value = ("connected_live" if provider == "smtp" else "connected_sandbox") if body.enabled else "not_configured"
     now = datetime.now(timezone.utc)
     await db.integrations.update_one(
@@ -1482,17 +1648,33 @@ async def upload_knowledge_file(body: KnowledgeFileIn, user: dict = Depends(curr
 # ============================================================
 # ROUTES: MEETINGS (Google Meet — SANDBOX mode)
 # ============================================================
-def _sandbox_meet_link() -> str:
-    import secrets, string
-    alpha = string.ascii_lowercase
-    chunk = lambda n: "".join(secrets.choice(alpha) for _ in range(n))
-    return f"https://meet.google.com/{chunk(3)}-{chunk(4)}-{chunk(3)}"
+async def _schedule_google_meeting(user_id: str, meeting: dict) -> dict:
+    access_token = await _google_access_token(user_id)
+    start = meeting["start_time"]
+    end = start + timedelta(minutes=int(meeting["duration_min"]))
+    event = {
+        "summary": meeting["title"], "description": meeting.get("description", ""),
+        "start": {"dateTime": start.isoformat(), "timeZone": "Asia/Kolkata"},
+        "end": {"dateTime": end.isoformat(), "timeZone": "Asia/Kolkata"},
+        "attendees": [{"email": email} for email in meeting.get("participants", [])],
+        "conferenceData": {"createRequest": {"requestId": f"unnatix-{meeting['id']}", "conferenceSolutionKey": {"type": "hangoutsMeet"}}},
+    }
+    async with httpx.AsyncClient(timeout=25) as http:
+        response = await http.post(
+            "https://www.googleapis.com/calendar/v3/calendars/primary/events",
+            params={"conferenceDataVersion": 1, "sendUpdates": "all"},
+            headers={"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}, json=event,
+        )
+    if response.status_code >= 400:
+        logger.warning("Calendar event creation failed: %s", response.status_code)
+        raise HTTPException(502, "Google Calendar event creation failed")
+    created = response.json()
+    return {"event_id": created.get("id"), "meet_link": created.get("hangoutLink"), "event_url": created.get("htmlLink")}
 
 
 @api.post("/meetings")
 async def create_meeting(body: MeetingIn, user: dict = Depends(current_user)):
     now = datetime.now(timezone.utc)
-    link = _sandbox_meet_link()
     doc = {
         "id": str(uuid.uuid4()),
         "user_id": user["id"],
@@ -1501,8 +1683,8 @@ async def create_meeting(body: MeetingIn, user: dict = Depends(current_user)):
         "start_time": body.start_time,
         "duration_min": body.duration_min,
         "description": body.description,
-        "meet_link": link,
-        "provider": "google_meet_sandbox",
+        "meet_link": None,
+        "provider": "google_calendar",
         "status": "pending_approval" if body.requires_approval else "scheduled",
         "created_at": now,
     }
@@ -1515,10 +1697,14 @@ async def create_meeting(body: MeetingIn, user: dict = Depends(current_user)):
             "task_id": doc["id"], "agent_id": "operations",
             "action": f"Send invites for: {body.title}",
             "impact": "Will send meeting invites to participants once approved.",
-            "payload_preview": f"Participants: {', '.join(body.participants) or '—'}\nWhen: {body.start_time.isoformat()}\nLink: {link}",
+            "payload_preview": f"Participants: {', '.join(body.participants) or 'none'}\nWhen: {body.start_time.isoformat()}\nGoogle Meet will be created after approval.",
             "status": "pending", "created_at": now,
         }
         await db.approvals.insert_one(appr)
+    else:
+        created = await _schedule_google_meeting(user["id"], doc)
+        doc.update(created)
+        await db.meetings.update_one({"id": doc["id"]}, {"$set": {**created, "status": "scheduled"}})
 
     await log_activity(user["id"], "operations", f"Kavya Sharma scheduled: {body.title}", "meeting")
     return doc
