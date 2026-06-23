@@ -1785,36 +1785,100 @@ async def _send_outreach(user_id: str, outreach_id: str) -> dict:
     return await db.outreach.find_one({"id": outreach_id}, {"_id": 0})
 
 
+async def _digital_presence_audit(lead: dict) -> dict:
+    website = lead.get("website")
+    if not website or not await _public_web_url(website):
+        return {"website": website, "facts": ["No safely accessible public website was available."],
+                "opportunities": ["Create or repair a conversion-focused business website."], "evidence": []}
+    try:
+        async with httpx.AsyncClient(timeout=15, follow_redirects=True, headers={"User-Agent": "UnnatiXDigitalAuditBot/1.0"}) as http:
+            response = await http.get(website)
+        html = response.text[:500000]
+        lower = html.lower()
+        title_match = re.search(r"<title[^>]*>(.*?)</title>", html, re.IGNORECASE | re.DOTALL)
+        meta_match = re.search(r"<meta[^>]+name=['\"]description['\"][^>]+content=['\"]([^'\"]+)", html, re.IGNORECASE)
+        has_viewport = 'name="viewport"' in lower or "name='viewport'" in lower
+        has_schema = "application/ld+json" in lower
+        has_analytics = any(x in lower for x in ("gtag(", "google-analytics.com", "googletagmanager.com"))
+        has_meta_pixel = "fbq(" in lower or "connect.facebook.net" in lower
+        facts = [
+            f"Website returned HTTP {response.status_code}.",
+            f"Page title: {re.sub(r'<[^>]+>', '', title_match.group(1)).strip()[:120] if title_match else 'missing'}.",
+            f"Meta description: {'present' if meta_match else 'not detected'}.",
+            f"Mobile viewport: {'present' if has_viewport else 'not detected'}.",
+            f"Structured data: {'present' if has_schema else 'not detected'}.",
+            f"Analytics tag: {'detected' if has_analytics else 'not detected'}.",
+            f"Meta Pixel: {'detected' if has_meta_pixel else 'not detected'}.",
+        ]
+        opportunities = []
+        if not meta_match:
+            opportunities.append("Add service-and-location focused metadata to improve organic click-through.")
+        if not has_schema:
+            opportunities.append("Add LocalBusiness/Service schema for stronger local-search understanding.")
+        if not has_analytics:
+            opportunities.append("Install GA4/conversion tracking before running paid campaigns.")
+        if not has_meta_pixel:
+            opportunities.append("Add Meta Pixel before retargeting or lead-generation campaigns.")
+        if not any(x in lower for x in ("book now", "contact us", "get quote", "schedule", "appointment")):
+            opportunities.append("Strengthen the primary call-to-action and lead-capture journey.")
+        if not opportunities:
+            opportunities.extend(["Run conversion-rate tests on the primary enquiry journey.",
+                                  "Build local SEO content and measurable retargeting campaigns."])
+        return {"website": str(response.url), "facts": facts, "opportunities": opportunities[:4],
+                "evidence": [str(response.url)], "checked_at": datetime.now(timezone.utc).isoformat()}
+    except Exception as exc:
+        logger.warning("Digital audit failed for %s: %s", website, type(exc).__name__)
+        return {"website": website, "facts": ["Website audit request could not be completed."],
+                "opportunities": ["Perform a manual website, SEO and tracking audit."], "evidence": [website]}
+
+
+def _deterministic_outreach_copy(lead: dict, audit: dict) -> tuple[str, str, str]:
+    opportunities = audit.get("opportunities") or ["improve digital lead generation"]
+    first = opportunities[0].rstrip(".")
+    second = opportunities[1].rstrip(".") if len(opportunities) > 1 else "improve the enquiry conversion journey"
+    subject = f"Two digital growth opportunities for {lead['company_name']}"
+    body = (
+        f"Hi {lead['company_name']} team,\n\n"
+        f"I reviewed your public website and noticed two practical opportunities: {first.lower()}, and {second.lower()}. "
+        "UnnatiX Technologies helps Delhi NCR businesses with SEO, social content, paid campaigns, tracking and conversion-focused websites.\n\n"
+        "We can share a free 20-minute audit showing the priority fixes and a measurable 30-day growth plan. "
+        "Would a short 15-minute call next week be useful?\n\n"
+        "If this is not relevant, reply no and I will not follow up.\n\n"
+        "Regards,\nArjun Mehta\nUnnatiX Technologies"
+    )
+    proposal = (
+        f"AUDIT EVIDENCE: {audit.get('website') or lead.get('website')}\n"
+        + "\n".join(f"- {fact}" for fact in audit.get("facts", []))
+        + "\n\nRECOMMENDED GROWTH PLAN\n"
+        + "\n".join(f"- {item}" for item in opportunities)
+        + "\n- Track qualified enquiries, cost per lead and booked meetings weekly."
+    )
+    return subject, body, proposal
+
+
 async def _queue_deterministic_outreach(user: dict, lead: dict) -> dict:
     duplicate = await db.outreach.find_one({
         "user_id": user["id"], "lead_id": lead["id"], "status": {"$in": ["pending_approval", "sent"]},
     }, {"_id": 0})
     if duplicate:
         raise HTTPException(409, "This lead already has pending or sent outreach")
-    subject = f"A digital growth idea for {lead['company_name']}"
-    body = (
-        f"Hi {lead['company_name']} team,\n\n"
-        f"I came across your publicly listed business presence in {lead.get('location') or 'Delhi NCR'}. "
-        "UnnatiX Technologies helps businesses improve local SEO, social content, paid campaigns and conversion-focused websites.\n\n"
-        "We would be happy to share a free 20-minute digital growth audit with a few practical opportunities specific to your online presence. "
-        "Would a short 15-minute call next week be useful?\n\n"
-        "If this is not relevant, reply no and I will not follow up.\n\n"
-        "Regards,\nArjun Mehta\nUnnatiX Technologies"
-    )
+    audit = await _digital_presence_audit(lead)
+    subject, body, proposal = _deterministic_outreach_copy(lead, audit)
     now = datetime.now(timezone.utc)
     outreach_id, approval_id = str(uuid.uuid4()), str(uuid.uuid4())
     outreach = {
         "id": outreach_id, "user_id": user["id"], "lead_id": lead["id"],
         "to_email": lead["email"], "company_name": lead["company_name"],
         "subject": subject, "body": body, "status": "pending_approval", "followup_number": 0,
-        "approval_id": approval_id, "source_urls": lead.get("source_urls", []), "created_at": now, "updated_at": now,
+        "approval_id": approval_id, "source_urls": lead.get("source_urls", []),
+        "digital_audit": audit, "proposal": proposal, "created_at": now, "updated_at": now,
     }
     await db.outreach.insert_one(outreach)
     await db.approvals.insert_one({
         "id": approval_id, "user_id": user["id"], "task_id": outreach_id, "agent_id": "sales",
         "action": f"Send real email to {lead['company_name']}",
         "impact": f"Will send from {SMTP_FROM_EMAIL} to Hunter-verified address {lead['email']}.",
-        "payload_preview": f"TO: {lead['email']}\nSUBJECT: {subject}\n\n{body}",
+        "payload_preview": f"{proposal}\n\nOUTREACH EMAIL\nTO: {lead['email']}\nSUBJECT: {subject}\n\n{body}",
         "status": "pending", "kind": "outreach_send", "created_at": now,
     })
     await db.leads.update_one({"id": lead["id"]}, {"$set": {"pipeline_stage": "awaiting_approval", "updated_at": now}})
@@ -1836,6 +1900,9 @@ async def create_outreach_draft(body: OutreachDraftIn, user: dict = Depends(curr
     }, {"_id": 0})
     if duplicate:
         raise HTTPException(409, "This lead already has pending or sent outreach")
+    audit = await _digital_presence_audit(lead)
+    audit_facts = "\n".join(f"- {item}" for item in audit.get("facts", []))
+    audit_opportunities = "\n".join(f"- {item}" for item in audit.get("opportunities", []))
     prompt = (
         "Write one concise, genuinely personalized B2B cold email from UnnatiX Technologies. "
         "Return strict JSON with keys subject and body only. Body must be under 170 words, plain text, respectful, "
@@ -1843,28 +1910,35 @@ async def create_outreach_draft(body: OutreachDraftIn, user: dict = Depends(curr
         "and end with 'If this is not relevant, reply no and I will not follow up.' Never invent results or clients.\n\n"
         f"Company: {lead.get('company_name')}\nIndustry: {lead.get('industry')}\nLocation: {lead.get('location')}\n"
         f"Website: {lead.get('website')}\nPublic source: {(lead.get('source_urls') or [''])[0]}\n"
+        f"Verified website audit facts:\n{audit_facts}\nGrowth opportunities:\n{audit_opportunities}\n"
         f"Offer: {body.offer_context}\nSender: Arjun Mehta, UnnatiX Technologies"
     )
-    raw = await llm_complete(AGENT_SYSTEM_PROMPTS["sales"], prompt, expect_json=True)
+    _, _, proposal = _deterministic_outreach_copy(lead, audit)
     try:
+        raw = await llm_complete(AGENT_SYSTEM_PROMPTS["sales"], prompt, expect_json=True)
         draft = json.loads(raw)
         subject = str(draft["subject"]).strip()[:160]
         email_body = str(draft["body"]).strip()[:4000]
-    except Exception:
-        raise HTTPException(502, "AI returned an invalid outreach draft")
+        if not subject or not email_body:
+            raise ValueError("Empty AI outreach draft")
+    except Exception as exc:
+        logger.warning("AI outreach generation failed; using evidence-based fallback: %s", type(exc).__name__)
+        subject, email_body, proposal = _deterministic_outreach_copy(lead, audit)
     now = datetime.now(timezone.utc)
     outreach_id, approval_id = str(uuid.uuid4()), str(uuid.uuid4())
     outreach = {
         "id": outreach_id, "user_id": user["id"], "lead_id": lead["id"],
         "to_email": lead["email"], "company_name": lead["company_name"],
         "subject": subject, "body": email_body, "status": "pending_approval",
-        "followup_number": 0, "approval_id": approval_id, "created_at": now, "updated_at": now,
+        "followup_number": 0, "approval_id": approval_id, "digital_audit": audit,
+        "proposal": proposal, "source_urls": lead.get("source_urls", []),
+        "created_at": now, "updated_at": now,
     }
     approval = {
         "id": approval_id, "user_id": user["id"], "task_id": outreach_id, "agent_id": "sales",
         "action": f"Send real email to {lead['company_name']}",
         "impact": f"Will send from {SMTP_FROM_EMAIL} to verified address {lead['email']}.",
-        "payload_preview": f"TO: {lead['email']}\nSUBJECT: {subject}\n\n{email_body}",
+        "payload_preview": f"{proposal}\n\nOUTREACH EMAIL\nTO: {lead['email']}\nSUBJECT: {subject}\n\n{email_body}",
         "status": "pending", "kind": "outreach_send", "created_at": now,
     }
     await db.outreach.insert_one(outreach)
