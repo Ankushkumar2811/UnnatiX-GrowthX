@@ -33,10 +33,10 @@ export default function CEOPage() {
   };
 
   const SUGGESTIONS = [
-    'Grow my AI business in the next 90 days',
-    'Launch a SaaS product for solo founders',
-    'Find 50 qualified B2B prospects',
-    'Build a content engine for LinkedIn',
+    'Win 10 new digital marketing clients in Delhi NCR',
+    'Build a 90-day SEO and content plan for a client',
+    'Launch a Google and Meta Ads lead-generation campaign',
+    'Create a website, social and performance marketing proposal',
   ];
 
   return (

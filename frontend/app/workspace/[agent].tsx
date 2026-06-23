@@ -10,14 +10,14 @@ import { api } from '@/src/api';
 type Task = { id: string; agent_id: string; title: string; description: string; priority: string; status: string; progress: number; requires_approval: boolean; output: string | null; created_at: string };
 
 const DEPT_META: Record<string, { eyebrow: string; sections: { id: string; label: string }[] }> = {
-  seo: { eyebrow: 'GROWTH · ORGANIC SEARCH', sections: [{ id: 'all', label: 'All Work' }, { id: 'running', label: 'Active' }, { id: 'completed', label: 'Delivered' }] },
-  marketing: { eyebrow: 'MARKETING WORKSPACE', sections: [{ id: 'all', label: 'All' }, { id: 'content', label: 'Content' }, { id: 'campaigns', label: 'Campaigns' }] },
-  sales:     { eyebrow: 'SALES WORKSPACE',     sections: [{ id: 'all', label: 'All' }, { id: 'leads', label: 'Leads' }, { id: 'outreach', label: 'Outreach drafts' }] },
-  research:  { eyebrow: 'RESEARCH WORKSPACE',  sections: [{ id: 'all', label: 'All' }, { id: 'reports', label: 'Reports' }, { id: 'trends', label: 'Trends' }] },
-  developer: { eyebrow: 'DEV WORKSPACE',       sections: [{ id: 'all', label: 'All' }, { id: 'projects', label: 'Projects' }, { id: 'docs', label: 'Docs' }] },
-  operations:{ eyebrow: 'OPS WORKSPACE',       sections: [{ id: 'all', label: 'All' }, { id: 'planning', label: 'Planning' }, { id: 'running', label: 'Running' }, { id: 'completed', label: 'Done' }] },
-  finance:   { eyebrow: 'FINANCE WORKSPACE',   sections: [{ id: 'all', label: 'All' }] },
-  hr:        { eyebrow: 'HR WORKSPACE',        sections: [{ id: 'all', label: 'All' }, { id: 'sops', label: 'SOPs' }, { id: 'knowledge', label: 'Knowledge' }] },
+  seo: { eyebrow: 'ORGANIC GROWTH · SEO', sections: [{ id: 'all', label: 'All Work' }, { id: 'running', label: 'Audits & Rankings' }, { id: 'completed', label: 'Delivered' }] },
+  marketing: { eyebrow: 'CREATIVE MARKETING', sections: [{ id: 'all', label: 'All' }, { id: 'content', label: 'Social & Content' }, { id: 'campaigns', label: 'Campaigns' }] },
+  sales:     { eyebrow: 'BUSINESS DEVELOPMENT', sections: [{ id: 'all', label: 'All' }, { id: 'leads', label: 'Leads & Proposals' }, { id: 'outreach', label: 'Outreach drafts' }] },
+  research:  { eyebrow: 'STRATEGY & RESEARCH', sections: [{ id: 'all', label: 'All' }, { id: 'reports', label: 'Client Research' }, { id: 'trends', label: 'Trends & Ads' }] },
+  developer: { eyebrow: 'WEB & APP DELIVERY', sections: [{ id: 'all', label: 'All' }, { id: 'projects', label: 'Sites & Apps' }, { id: 'docs', label: 'Tracking & Docs' }] },
+  operations:{ eyebrow: 'CLIENT OPERATIONS', sections: [{ id: 'all', label: 'All' }, { id: 'planning', label: 'Onboarding' }, { id: 'running', label: 'In Delivery' }, { id: 'completed', label: 'Reported' }] },
+  finance:   { eyebrow: 'FINANCE · ROI & ROAS', sections: [{ id: 'all', label: 'Budgets & Returns' }] },
+  hr:        { eyebrow: 'PEOPLE · SOP & TRAINING', sections: [{ id: 'all', label: 'All' }, { id: 'sops', label: 'Agency SOPs' }, { id: 'knowledge', label: 'Training & Knowledge' }] },
 };
 
 export default function Workspace() {
