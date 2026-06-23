@@ -483,16 +483,32 @@ async def llm_complete(system_prompt: str, user_prompt: str, expect_json: bool =
     }
     failures = []
     for provider in providers:
-        try:
-            raw = await callers[provider](system_prompt, user_prompt)
-            cleaned = _clean_model_text(raw)
-            if expect_json:
-                json.loads(cleaned)
-            logger.info("LLM request completed via %s", provider)
-            return cleaned
-        except Exception as exc:
-            failures.append(provider)
-            logger.warning("LLM provider %s failed: %s", provider, type(exc).__name__)
+        for attempt in range(1, 4):
+            try:
+                raw = await callers[provider](system_prompt, user_prompt)
+                cleaned = _clean_model_text(raw)
+                if expect_json:
+                    json.loads(cleaned)
+                logger.info("LLM request completed via %s (attempt %s)", provider, attempt)
+                return cleaned
+            except Exception as exc:
+                status_code = exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else None
+                transient = (
+                    isinstance(exc, (httpx.TimeoutException, httpx.TransportError))
+                    or status_code == 429
+                    or (status_code is not None and status_code >= 500)
+                )
+                logger.warning(
+                    "LLM provider %s attempt %s failed: %s%s",
+                    provider,
+                    attempt,
+                    type(exc).__name__,
+                    f" status={status_code}" if status_code else "",
+                )
+                if not transient or attempt == 3:
+                    break
+                await asyncio.sleep(2 ** (attempt - 1))
+        failures.append(provider)
 
     raise HTTPException(
         status_code=502,
