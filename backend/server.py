@@ -45,6 +45,11 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-5.4")
 ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-6")
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash-lite")
+GEMINI_MODELS = list(dict.fromkeys(
+    model.strip() for model in os.environ.get(
+        "GEMINI_MODELS", f"{GEMINI_MODEL},gemini-2.5-flash"
+    ).split(",") if model.strip()
+))
 SMTP_HOST = os.environ.get("SMTP_HOST", "")
 SMTP_PORT = int(os.environ.get("SMTP_PORT", "587"))
 SMTP_USER = os.environ.get("SMTP_USER", "")
@@ -496,7 +501,7 @@ async def _call_anthropic(system_prompt: str, user_prompt: str) -> str:
     return text
 
 
-async def _call_gemini(system_prompt: str, user_prompt: str) -> str:
+async def _call_gemini(system_prompt: str, user_prompt: str, model: Optional[str] = None) -> str:
     payload = {
         "systemInstruction": {"parts": [{"text": system_prompt}]},
         "contents": [{"role": "user", "parts": [{"text": user_prompt}]}],
@@ -504,7 +509,7 @@ async def _call_gemini(system_prompt: str, user_prompt: str) -> str:
     }
     async with httpx.AsyncClient(timeout=45.0) as http:
         response = await http.post(
-            f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent",
+            f"https://generativelanguage.googleapis.com/v1beta/models/{model or GEMINI_MODEL}:generateContent",
             headers={"x-goog-api-key": GEMINI_API_KEY},
             json=payload,
         )
@@ -536,31 +541,31 @@ async def llm_complete(system_prompt: str, user_prompt: str, expect_json: bool =
     }
     failures = []
     for provider in providers:
-        for attempt in range(1, 4):
-            try:
-                raw = await callers[provider](system_prompt, user_prompt)
-                cleaned = _clean_model_text(raw)
-                if expect_json:
-                    json.loads(cleaned)
-                logger.info("LLM request completed via %s (attempt %s)", provider, attempt)
-                return cleaned
-            except Exception as exc:
-                status_code = exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else None
-                transient = (
-                    isinstance(exc, (httpx.TimeoutException, httpx.TransportError))
-                    or status_code == 429
-                    or (status_code is not None and status_code >= 500)
-                )
-                logger.warning(
-                    "LLM provider %s attempt %s failed: %s%s",
-                    provider,
-                    attempt,
-                    type(exc).__name__,
-                    f" status={status_code}" if status_code else "",
-                )
-                if not transient or attempt == 3:
-                    break
-                await asyncio.sleep(2 ** (attempt - 1))
+        variants = GEMINI_MODELS if provider == "gemini" else [None]
+        for variant in variants:
+            for attempt in range(1, 3):
+                try:
+                    raw = await (_call_gemini(system_prompt, user_prompt, variant) if provider == "gemini" else callers[provider](system_prompt, user_prompt))
+                    cleaned = _clean_model_text(raw)
+                    if expect_json:
+                        json.loads(cleaned)
+                    logger.info("LLM request completed via %s%s (attempt %s)", provider, f"/{variant}" if variant else "", attempt)
+                    return cleaned
+                except Exception as exc:
+                    status_code = exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else None
+                    transient = (
+                        isinstance(exc, (httpx.TimeoutException, httpx.TransportError))
+                        or status_code == 429
+                        or (status_code is not None and status_code >= 500)
+                    )
+                    logger.warning(
+                        "LLM provider %s%s attempt %s failed: %s%s",
+                        provider, f"/{variant}" if variant else "", attempt, type(exc).__name__,
+                        f" status={status_code}" if status_code else "",
+                    )
+                    if not transient or attempt == 2:
+                        break
+                    await asyncio.sleep(2 ** (attempt - 1))
         failures.append(provider)
 
     raise HTTPException(
@@ -610,13 +615,19 @@ Rules:
 
 async def llm_orchestrate(objective: str) -> dict:
     """Build an execution plan through the configured provider failover chain."""
-    text = await llm_complete(
-        ORCHESTRATION_PROMPT,
-        f"Business objective: {objective}",
-        expect_json=True,
-    )
-    plan = json.loads(text)
-    return _validate_plan(plan, objective)
+    try:
+        text = await llm_complete(
+            ORCHESTRATION_PROMPT,
+            f"Business objective: {objective}",
+            expect_json=True,
+        )
+        plan = json.loads(text)
+        return _validate_plan(plan, objective)
+    except HTTPException as exc:
+        if exc.status_code not in {502, 503}:
+            raise
+        logger.warning("CEO AI unavailable; using safe executable fallback plan")
+        return _fallback_plan(objective)
 
 
 def _validate_plan(plan: dict, objective: str) -> dict:
