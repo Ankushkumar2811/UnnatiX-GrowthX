@@ -1361,10 +1361,6 @@ async def analytics_overview(user: dict = Depends(current_user)):
 # APP WIRING
 # ============================================================
 app.include_router(api)
-app.add_middleware(
-    CORSMiddleware, allow_credentials=True, allow_origins=["*"],
-    allow_methods=["*"], allow_headers=["*"],
-)
 
 
 @app.on_event("startup")
@@ -1383,3 +1379,14 @@ async def _startup():
 @app.on_event("shutdown")
 async def _shutdown():
     client.close()
+
+
+# Keep CORS outside FastAPI's error middleware so even unexpected 5xx responses
+# remain readable by the Expo web client instead of surfacing as "Failed to fetch".
+app = CORSMiddleware(
+    app=app,
+    allow_credentials=False,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
