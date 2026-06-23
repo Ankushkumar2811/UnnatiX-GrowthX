@@ -111,12 +111,16 @@ export default function Dashboard() {
           </Pressable>
         </View>
         <View style={[s.quickRow, { marginTop: 10 }]}>
+          <Pressable testID="dashboard-leads-link" onPress={() => router.push('/leads' as any)} style={s.quickTile}>
+            <Ionicons name="people" size={18} color={theme.color.brand} />
+            <Text style={s.quickTitle}>Live Leads</Text>
+            <Text style={s.quickSub}>Google · website · Hunter</Text>
+          </Pressable>
           <Pressable testID="dashboard-billing-link" onPress={() => router.push('/billing' as any)} style={s.quickTile}>
             <Ionicons name="card" size={18} color={theme.color.brand} />
             <Text style={s.quickTitle}>Billing</Text>
             <Text style={s.quickSub}>Stripe · plans</Text>
           </Pressable>
-          <View style={[s.quickTile, { opacity: 0 }]} />
         </View>
 
         <Text style={s.section}>LIVE ACTIVITY FEED</Text>
