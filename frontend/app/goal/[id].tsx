@@ -25,15 +25,15 @@ export default function GoalDetail() {
   useFocusEffect(useCallback(() => { load(); }, [load]));
 
   useEffect(() => {
-    if (!goal || busy || !goal.tasks.some(t => t.status === 'planning')) return;
+    if (!goal || busy || autoError || !goal.tasks.some(t => t.status === 'planning')) return;
     const timer = setTimeout(async () => {
       setBusy('auto'); setAutoError(null);
       try { await api(`/goals/${id}/run-next`, { method: 'POST' }); await load(); }
       catch (e: any) { setAutoError(e.message || 'Employee execution paused'); }
       finally { setBusy(null); }
-    }, 700);
+    }, 10000);
     return () => clearTimeout(timer);
-  }, [goal, busy, id, load]);
+  }, [goal, busy, autoError, id, load]);
 
   const generate = async (taskId: string) => {
     setBusy(taskId);
@@ -81,7 +81,7 @@ export default function GoalDetail() {
           <Ionicons name={busy === 'auto' ? 'sync' : 'flash'} size={15} color={theme.color.brand} />
           <Text style={s.autoText}>{busy === 'auto' ? 'AI employee is working automatically…' : 'Autopilot is on — safe tasks run without separate clicks.'}</Text>
         </View>
-        {autoError && <Text style={s.autoError}>{autoError}</Text>}
+        {autoError && <View style={s.retryBox}><Text style={s.autoError}>{autoError}</Text><Pressable onPress={() => setAutoError(null)} style={s.retryBtn}><Text style={s.retryText}>Retry after cooldown</Text></Pressable></View>}
 
         {goal.tasks.map((t, i) => {
           const meta = AGENT_META[t.agent_id] || { name: t.agent_id, role: '', accent: theme.color.onSurface };
@@ -153,7 +153,10 @@ const s = StyleSheet.create({
   section: { ...theme.type.label, color: theme.color.onSurfaceTertiary, marginTop: theme.spacing.xl, marginBottom: theme.spacing.md },
   autoBox: { flexDirection: 'row', alignItems: 'center', gap: 8, padding: 11, borderWidth: 1, borderColor: theme.color.brand + '55', backgroundColor: theme.color.brand + '10', borderRadius: theme.radius.sm, marginBottom: theme.spacing.md },
   autoText: { color: theme.color.onSurfaceSecondary, fontSize: 12, flex: 1 },
-  autoError: { color: theme.color.error, fontSize: 12, marginBottom: theme.spacing.md },
+  retryBox: { marginBottom: theme.spacing.md },
+  autoError: { color: theme.color.error, fontSize: 12 },
+  retryBtn: { alignSelf: 'flex-start', borderWidth: 1, borderColor: theme.color.brand, borderRadius: theme.radius.sm, paddingHorizontal: 10, paddingVertical: 7, marginTop: 8 },
+  retryText: { color: theme.color.brand, fontSize: 11, fontWeight: '700' },
   row: { flexDirection: 'row', gap: 12 },
   rowGutter: { alignItems: 'center', width: 28 },
   node: { width: 28, height: 28, borderRadius: 14, alignItems: 'center', justifyContent: 'center' },

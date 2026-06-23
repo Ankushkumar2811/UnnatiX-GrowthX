@@ -1008,7 +1008,9 @@ async def generate_task_output(task_id: str, user: dict = Depends(current_user))
 async def run_next_goal_task(goal_id: str, user: dict = Depends(current_user)):
     """Run one eligible employee task; clients call repeatedly until the queue is drained."""
     task = await db.tasks.find_one_and_update(
-        {"goal_id": goal_id, "user_id": user["id"], "status": "planning"},
+        {"goal_id": goal_id, "user_id": user["id"], "status": "planning", "$or": [
+            {"retry_after": {"$exists": False}}, {"retry_after": {"$lte": datetime.now(timezone.utc)}},
+        ]},
         {"$set": {"status": "running", "progress": 55, "execution_status": "working",
                   "updated_at": datetime.now(timezone.utc)}},
         sort=[("created_at", 1)], return_document=True,
@@ -1022,7 +1024,7 @@ async def run_next_goal_task(goal_id: str, user: dict = Depends(current_user)):
         await db.tasks.update_one({"id": task["id"]}, {"$set": {
             "output": output, "status": "completed", "progress": 100,
             "execution_status": _result_status(task), "updated_at": datetime.now(timezone.utc),
-        }})
+        }, "$unset": {"retry_after": ""}})
         await log_activity(user["id"], task["agent_id"], f"Auto-delivered: {task['title']}", "output")
         remaining = await db.tasks.count_documents({"goal_id": goal_id, "user_id": user["id"], "status": "planning"})
         if remaining == 0:
@@ -1034,10 +1036,11 @@ async def run_next_goal_task(goal_id: str, user: dict = Depends(current_user)):
     except Exception as exc:
         await db.tasks.update_one({"id": task["id"]}, {"$set": {
             "status": "planning", "progress": 25, "execution_status": "retry_queued",
+            "retry_after": datetime.now(timezone.utc) + timedelta(minutes=5),
             "updated_at": datetime.now(timezone.utc),
         }})
         logger.error("Autonomous task failed: %s", exc)
-        raise HTTPException(502, "Employee execution failed; queued for retry")
+        raise HTTPException(429, "Gemini quota is temporarily busy. Employee paused for 5 minutes; task is safe in retry queue.")
 
 
 @api.post("/tasks/quick")
