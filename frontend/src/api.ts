@@ -1,6 +1,6 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
-const BASE = process.env.EXPO_PUBLIC_BACKEND_URL;
+const BASE = (process.env.EXPO_PUBLIC_BACKEND_URL || 'https://backend-zeta-seven-97.vercel.app').replace(/\/+$/, '');
 const TOKEN_KEY = 'unnatix.token';
 
 export const setToken = (t: string) => AsyncStorage.setItem(TOKEN_KEY, t);
