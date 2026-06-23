@@ -223,6 +223,9 @@ class Task(BaseModel):
     progress: int
     requires_approval: bool
     output: Optional[str] = None
+    delivery_type: str = "document"
+    execution_status: str = "queued"
+    evidence: List[str] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime
 
@@ -702,6 +705,9 @@ async def create_goal(body: GoalIn, user: dict = Depends(current_user)):
             "progress": 10 if t["requires_approval"] else 25,
             "requires_approval": t["requires_approval"],
             "output": None,
+            "delivery_type": _delivery_type(t),
+            "execution_status": "waiting_approval" if t["requires_approval"] else "queued",
+            "evidence": [],
             "created_at": now,
             "updated_at": now,
         }
@@ -792,11 +798,11 @@ async def decide_approval(approval_id: str, body: ApprovalDecisionIn, user: dict
     now = datetime.now(timezone.utc)
     await db.approvals.update_one({"id": approval_id}, {"$set": {"status": body.decision, "decided_at": now}})
 
-    new_task_status = "running" if body.decision == "approved" else "cancelled"
-    new_progress = 60 if body.decision == "approved" else 0
+    new_task_status = "planning" if body.decision == "approved" else "cancelled"
+    new_progress = 25 if body.decision == "approved" else 0
     await db.tasks.update_one(
         {"id": appr["task_id"]},
-        {"$set": {"status": new_task_status, "progress": new_progress, "updated_at": now}},
+        {"$set": {"status": new_task_status, "progress": new_progress, "execution_status": "queued" if body.decision == "approved" else "cancelled", "updated_at": now}},
     )
     verb = "approved" if body.decision == "approved" else "rejected"
     await log_activity(user["id"], appr["agent_id"], f"Founder {verb}: {appr['action']}", "approval")
@@ -852,6 +858,26 @@ AGENT_SYSTEM_PROMPTS = {
 }
 
 
+def _delivery_type(task: dict) -> str:
+    text = f"{task.get('title', '')} {task.get('description', '')}".lower()
+    if any(x in text for x in ("send email", "outreach", "linkedin", "whatsapp", "publish", "launch campaign")):
+        return "external_action"
+    if task.get("agent_id") in {"sales", "research"} and any(x in text for x in ("lead", "prospect", "target list", "verified")):
+        return "live_research"
+    if task.get("agent_id") == "marketing" and any(x in text for x in ("image", "creative", "poster", "carousel")):
+        return "creative_asset"
+    if task.get("agent_id") == "developer" and any(x in text for x in ("implement", "deploy", "build", "fix")):
+        return "code_change"
+    return "document"
+
+
+def _result_status(task: dict) -> str:
+    delivery = task.get("delivery_type") or _delivery_type(task)
+    return "draft_ready_needs_integration" if delivery in {
+        "external_action", "live_research", "creative_asset", "code_change"
+    } else "delivered"
+
+
 async def llm_generate_output(agent_id: str, task: dict, knowledge: List[dict]) -> str:
     """Produce a task deliverable through the configured provider failover chain."""
     sys_prompt = AGENT_SYSTEM_PROMPTS.get(agent_id, AGENT_SYSTEM_PROMPTS["operations"])
@@ -863,7 +889,10 @@ async def llm_generate_output(agent_id: str, task: dict, knowledge: List[dict]) 
         f"Task: {task['title']}\n"
         f"Brief: {task['description']}\n\n"
         f"Produce the deliverable now. Output the deliverable directly — no preamble like 'here is the...'. "
-        f"Keep it concise but complete (under ~500 words)."
+        f"This is a {task.get('delivery_type', 'document')} task. Never claim that leads were verified, emails or messages "
+        f"were sent, images were created, pages were published, ads were launched, or an external system changed unless "
+        f"real tool evidence is supplied. If an integration is needed, make the best ready-to-use draft and finish with "
+        f"a clearly labelled ACTION REQUIRED section. Keep it concise but complete (under ~500 words)."
     )
     return await llm_complete(sys_prompt, user_prompt)
 
@@ -889,12 +918,49 @@ async def generate_task_output(task_id: str, user: dict = Depends(current_user))
     now = datetime.now(timezone.utc)
     await db.tasks.update_one(
         {"id": task_id},
-        {"$set": {"output": output, "status": "completed", "progress": 100, "updated_at": now}},
+        {"$set": {"output": output, "status": "completed", "progress": 100,
+                  "execution_status": _result_status(task), "updated_at": now}},
     )
     agent_name = next((e["name"] for e in AI_EMPLOYEES if e["id"] == task["agent_id"]), task["agent_id"])
     await log_activity(user["id"], task["agent_id"], f"{agent_name} delivered: {task['title']}", "output")
     updated = await db.tasks.find_one({"id": task_id}, {"_id": 0})
     return updated
+
+
+@api.post("/goals/{goal_id}/run-next")
+async def run_next_goal_task(goal_id: str, user: dict = Depends(current_user)):
+    """Run one eligible employee task; clients call repeatedly until the queue is drained."""
+    task = await db.tasks.find_one_and_update(
+        {"goal_id": goal_id, "user_id": user["id"], "status": "planning"},
+        {"$set": {"status": "running", "progress": 55, "execution_status": "working",
+                  "updated_at": datetime.now(timezone.utc)}},
+        sort=[("created_at", 1)], return_document=True,
+    )
+    if not task:
+        return {"processed": False, "remaining": 0}
+    task.pop("_id", None)
+    knowledge = await db.knowledge.find({"user_id": user["id"]}, {"_id": 0}).sort("created_at", -1).to_list(5)
+    try:
+        output = await llm_generate_output(task["agent_id"], task, knowledge)
+        await db.tasks.update_one({"id": task["id"]}, {"$set": {
+            "output": output, "status": "completed", "progress": 100,
+            "execution_status": _result_status(task), "updated_at": datetime.now(timezone.utc),
+        }})
+        await log_activity(user["id"], task["agent_id"], f"Auto-delivered: {task['title']}", "output")
+        remaining = await db.tasks.count_documents({"goal_id": goal_id, "user_id": user["id"], "status": "planning"})
+        if remaining == 0:
+            waiting = await db.tasks.count_documents({"goal_id": goal_id, "user_id": user["id"], "status": "waiting_approval"})
+            if waiting == 0:
+                await db.goals.update_one({"id": goal_id}, {"$set": {"status": "completed"}})
+                await fire_automations(user["id"], "goal_completed", {"goal_id": goal_id})
+        return {"processed": True, "task_id": task["id"], "remaining": remaining}
+    except Exception as exc:
+        await db.tasks.update_one({"id": task["id"]}, {"$set": {
+            "status": "planning", "progress": 25, "execution_status": "retry_queued",
+            "updated_at": datetime.now(timezone.utc),
+        }})
+        logger.error("Autonomous task failed: %s", exc)
+        raise HTTPException(502, "Employee execution failed; queued for retry")
 
 
 @api.post("/tasks/quick")
@@ -915,6 +981,9 @@ async def create_quick_task(body: TaskQuickIn, user: dict = Depends(current_user
         "progress": 10 if body.requires_approval else 25,
         "requires_approval": body.requires_approval,
         "output": None,
+        "delivery_type": _delivery_type({"agent_id": body.agent_id, "title": body.title, "description": body.description}),
+        "execution_status": "waiting_approval" if body.requires_approval else "queued",
+        "evidence": [],
         "created_at": now,
         "updated_at": now,
     }

@@ -28,6 +28,7 @@ export default function CEOPage() {
     try {
       const g = await api<Goal>('/goals', { method: 'POST', body: { objective: objective.trim() } });
       setGoal(g); setObjective(''); loadRecent();
+      router.push(`/goal/${g.id}` as any);
     } catch (e: any) { setErr(e.message); }
     finally { setBusy(false); }
   };
@@ -46,7 +47,7 @@ export default function CEOPage() {
         <ScrollView contentContainerStyle={s.scroll} keyboardShouldPersistTaps="handled">
           <Text style={s.eyebrow}>CEO ORCHESTRATION</Text>
           <Text style={s.h1}>Brief Shri Nath.</Text>
-          <Text style={s.sub}>Drop a business objective. Your CEO AI will break it down and delegate across departments.</Text>
+          <Text style={s.sub}>Give one business objective. Shri Nath delegates it and safe employee tasks start automatically; external actions wait for your approval and a live integration.</Text>
 
           <View style={s.inputWrap}>
             <TextInput

@@ -1,4 +1,4 @@
-import { useCallback, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { View, Text, StyleSheet, ScrollView, Pressable, ActivityIndicator } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useLocalSearchParams, useRouter, useFocusEffect } from 'expo-router';
@@ -6,7 +6,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { theme, AGENT_META } from '@/src/theme';
 import { api } from '@/src/api';
 
-type Task = { id: string; agent_id: string; title: string; description: string; priority: string; status: string; progress: number; requires_approval: boolean; output: string | null };
+type Task = { id: string; agent_id: string; title: string; description: string; priority: string; status: string; progress: number; requires_approval: boolean; output: string | null; delivery_type?: string; execution_status?: string; evidence?: string[] };
 type Goal = { id: string; objective: string; summary: string; status: string; created_at: string; tasks: Task[] };
 
 const STATUS_LABEL: Record<string, string> = { pending: 'PENDING', planning: 'PLANNING', running: 'RUNNING', waiting_approval: 'AWAITING APPROVAL', completed: 'COMPLETED', cancelled: 'CANCELLED' };
@@ -17,11 +17,23 @@ export default function GoalDetail() {
   const router = useRouter();
   const [goal, setGoal] = useState<Goal | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
+  const [autoError, setAutoError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try { setGoal(await api<Goal>(`/goals/${id}`)); } catch {}
   }, [id]);
   useFocusEffect(useCallback(() => { load(); }, [load]));
+
+  useEffect(() => {
+    if (!goal || busy || !goal.tasks.some(t => t.status === 'planning')) return;
+    const timer = setTimeout(async () => {
+      setBusy('auto'); setAutoError(null);
+      try { await api(`/goals/${id}/run-next`, { method: 'POST' }); await load(); }
+      catch (e: any) { setAutoError(e.message || 'Employee execution paused'); }
+      finally { setBusy(null); }
+    }, 700);
+    return () => clearTimeout(timer);
+  }, [goal, busy, id, load]);
 
   const generate = async (taskId: string) => {
     setBusy(taskId);
@@ -65,6 +77,12 @@ export default function GoalDetail() {
 
         <Text style={s.section}>EXECUTION WORKFLOW</Text>
 
+        <View style={s.autoBox}>
+          <Ionicons name={busy === 'auto' ? 'sync' : 'flash'} size={15} color={theme.color.brand} />
+          <Text style={s.autoText}>{busy === 'auto' ? 'AI employee is working automatically…' : 'Autopilot is on — safe tasks run without separate clicks.'}</Text>
+        </View>
+        {autoError && <Text style={s.autoError}>{autoError}</Text>}
+
         {goal.tasks.map((t, i) => {
           const meta = AGENT_META[t.agent_id] || { name: t.agent_id, role: '', accent: theme.color.onSurface };
           const canGen = !t.output && t.status !== 'waiting_approval' && t.status !== 'cancelled' && t.status !== 'completed';
@@ -83,6 +101,10 @@ export default function GoalDetail() {
                 </View>
                 <Text style={s.taskTitle}>{t.title}</Text>
                 <Text style={s.taskDesc}>{t.description}</Text>
+
+                {!!t.execution_status && (
+                  <Text style={[s.execution, t.execution_status.includes('needs_integration') && { color: theme.color.warning }]}>Execution: {t.execution_status.replaceAll('_', ' ')}</Text>
+                )}
 
                 {t.output ? (
                   <View style={s.outputBox}>
@@ -129,6 +151,9 @@ const s = StyleSheet.create({
   progTrack: { height: 4, backgroundColor: theme.color.surfaceTertiary, borderRadius: 2, overflow: 'hidden' },
   progFill: { height: '100%', backgroundColor: theme.color.brand },
   section: { ...theme.type.label, color: theme.color.onSurfaceTertiary, marginTop: theme.spacing.xl, marginBottom: theme.spacing.md },
+  autoBox: { flexDirection: 'row', alignItems: 'center', gap: 8, padding: 11, borderWidth: 1, borderColor: theme.color.brand + '55', backgroundColor: theme.color.brand + '10', borderRadius: theme.radius.sm, marginBottom: theme.spacing.md },
+  autoText: { color: theme.color.onSurfaceSecondary, fontSize: 12, flex: 1 },
+  autoError: { color: theme.color.error, fontSize: 12, marginBottom: theme.spacing.md },
   row: { flexDirection: 'row', gap: 12 },
   rowGutter: { alignItems: 'center', width: 28 },
   node: { width: 28, height: 28, borderRadius: 14, alignItems: 'center', justifyContent: 'center' },
@@ -141,6 +166,7 @@ const s = StyleSheet.create({
   statText: { fontSize: 9, fontWeight: '700', letterSpacing: 0.6 },
   taskTitle: { color: theme.color.onSurface, fontSize: 15, fontWeight: '700' },
   taskDesc: { color: theme.color.onSurfaceSecondary, fontSize: 13, marginTop: 4, lineHeight: 18 },
+  execution: { color: theme.color.success, fontSize: 10, fontWeight: '700', marginTop: 8, textTransform: 'uppercase', letterSpacing: 0.4 },
   outputBox: { marginTop: theme.spacing.md, backgroundColor: theme.color.surfaceTertiary, borderRadius: theme.radius.sm, padding: theme.spacing.md, borderWidth: 1, borderColor: theme.color.border },
   outputLabel: { ...theme.type.label, color: theme.color.onSurfaceTertiary, fontSize: 9 },
   outputText: { color: theme.color.onSurface, fontSize: 13, marginTop: 8, lineHeight: 20 },
