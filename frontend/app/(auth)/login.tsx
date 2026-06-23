@@ -9,8 +9,8 @@ import { useAuth } from '@/src/auth';
 export default function Login() {
   const { login } = useAuth();
   const router = useRouter();
-  const [email, setEmail] = useState('founder@unnatix.dev');
-  const [password, setPassword] = useState('Founder@123');
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 

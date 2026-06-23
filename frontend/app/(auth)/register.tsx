@@ -31,7 +31,7 @@ export default function Register() {
           </Pressable>
 
           <Text style={s.h1}>Found your AI company</Text>
-          <Text style={s.sub}>Eight AI employees, ready to work for you in seconds.</Text>
+          <Text style={s.sub}>Nine AI employees, ready to work for you in seconds.</Text>
 
           <View style={s.field}>
             <Text style={s.label}>Founder name</Text>
