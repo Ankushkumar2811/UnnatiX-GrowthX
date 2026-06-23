@@ -1,0 +1,20 @@
+name: UnnatiX autonomous worker
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+
+jobs:
+  tick:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Process safe AI work, replies, and follow-up approvals
+        env:
+          WORKER_SECRET: ${{ secrets.WORKER_SECRET }}
+        run: |
+          curl --fail --silent --show-error --retry 2 \
+            -X POST \
+            -H "Authorization: Bearer ${WORKER_SECRET}" \
+            https://backend-zeta-seven-97.vercel.app/api/worker/tick

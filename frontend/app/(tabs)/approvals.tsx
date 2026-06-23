@@ -12,14 +12,15 @@ export default function Approvals() {
   const [items, setItems] = useState<Approval[]>([]);
   const [refreshing, setRefreshing] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => { try { setItems(await api<Approval[]>('/approvals')); } catch {} }, []);
   useFocusEffect(useCallback(() => { load(); }, [load]));
 
   const decide = async (id: string, decision: 'approved' | 'rejected') => {
-    setBusy(id);
+    setBusy(id); setError(null);
     try { await api(`/approvals/${id}/decision`, { method: 'POST', body: { decision } }); await load(); }
-    catch {} finally { setBusy(null); }
+    catch (e: any) { setError(e.message || 'Action failed'); } finally { setBusy(null); }
   };
 
   const pending = items.filter(i => i.status === 'pending');
@@ -33,6 +34,7 @@ export default function Approvals() {
       </View>
       <ScrollView contentContainerStyle={s.scroll} refreshControl={<RefreshControl tintColor={theme.color.brand} refreshing={refreshing} onRefresh={async () => { setRefreshing(true); await load(); setRefreshing(false); }} />}>
         <Text style={s.intro}>Sensitive actions (sending emails, publishing, deploying) wait here for your green light.</Text>
+        {!!error && <Text style={s.error}>{error}</Text>}
 
         {pending.length === 0 && (
           <View style={s.emptyCard}>
@@ -102,6 +104,7 @@ const s = StyleSheet.create({
   title: { color: theme.color.onSurface, fontSize: 30, fontWeight: '800', letterSpacing: 0.3, marginTop: 2 },
   scroll: { padding: theme.spacing.xl, paddingBottom: theme.spacing.xl3 },
   intro: { color: theme.color.onSurfaceTertiary, fontSize: 13, marginBottom: theme.spacing.lg, lineHeight: 18 },
+  error: { color: theme.color.error, fontSize: 12, marginBottom: theme.spacing.md },
   emptyCard: { backgroundColor: theme.color.surfaceSecondary, borderWidth: 1, borderColor: theme.color.border, borderRadius: theme.radius.lg, padding: theme.spacing.xl, alignItems: 'center', gap: 8 },
   emptyTitle: { color: theme.color.onSurface, fontSize: 16, fontWeight: '700', marginTop: 4 },
   emptySub: { color: theme.color.onSurfaceTertiary, fontSize: 13, textAlign: 'center' },

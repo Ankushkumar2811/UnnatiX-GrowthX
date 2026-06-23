@@ -11,8 +11,9 @@ import socket
 import ipaddress
 import hashlib
 import base64
+import hmac
 from email.message import EmailMessage
-from email.utils import formataddr, make_msgid
+from email.utils import formataddr, make_msgid, parseaddr
 from urllib.parse import urljoin, urlparse
 from urllib.robotparser import RobotFileParser
 from datetime import datetime, timezone, timedelta
@@ -57,6 +58,8 @@ GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID", "")
 GOOGLE_CLIENT_SECRET = os.environ.get("GOOGLE_CLIENT_SECRET", "")
 GOOGLE_REDIRECT_URI = os.environ.get("GOOGLE_REDIRECT_URI", "https://backend-zeta-seven-97.vercel.app/api/integrations/google/callback")
 GOOGLE_OAUTH_ENCRYPTION_KEY = os.environ.get("GOOGLE_OAUTH_ENCRYPTION_KEY", "") or JWT_SECRET
+DAILY_EMAIL_LIMIT = int(os.environ.get("DAILY_EMAIL_LIMIT", "25"))
+CRON_SECRET = os.environ.get("CRON_SECRET", "")
 LLM_PROVIDER_ORDER = [
     p.strip().lower()
     for p in os.environ.get("LLM_PROVIDER_ORDER", "openai,anthropic,gemini").split(",")
@@ -319,6 +322,11 @@ class LeadEnrichIn(BaseModel):
     lead_id: Optional[str] = None
     limit: int = Field(default=1, ge=1, le=10)
     verify_email: bool = True
+
+
+class OutreachDraftIn(BaseModel):
+    lead_id: str
+    offer_context: str = Field(default="Free 20-minute digital growth audit", max_length=300)
 
 
 class KnowledgeFileIn(BaseModel):
@@ -837,26 +845,35 @@ async def decide_approval(approval_id: str, body: ApprovalDecisionIn, user: dict
     appr = await db.approvals.find_one({"id": approval_id, "user_id": user["id"]}, {"_id": 0})
     if not appr:
         raise HTTPException(404, "Approval not found")
+    if appr.get("status") != "pending":
+        raise HTTPException(409, "Approval has already been decided")
     now = datetime.now(timezone.utc)
-    await db.approvals.update_one({"id": approval_id}, {"$set": {"status": body.decision, "decided_at": now}})
-
-    new_task_status = "planning" if body.decision == "approved" else "cancelled"
-    new_progress = 25 if body.decision == "approved" else 0
-    await db.tasks.update_one(
-        {"id": appr["task_id"]},
-        {"$set": {"status": new_task_status, "progress": new_progress, "execution_status": "queued" if body.decision == "approved" else "cancelled", "updated_at": now}},
-    )
-    verb = "approved" if body.decision == "approved" else "rejected"
-    await log_activity(user["id"], appr["agent_id"], f"Founder {verb}: {appr['action']}", "approval")
+    outreach = await db.outreach.find_one({"id": appr["task_id"], "user_id": user["id"]}, {"_id": 0})
+    meeting = await db.meetings.find_one({"id": appr["task_id"], "user_id": user["id"]}, {"_id": 0})
     if body.decision == "approved":
-        meeting = await db.meetings.find_one({"id": appr["task_id"], "user_id": user["id"]}, {"_id": 0})
-        if meeting:
+        if outreach:
+            await _send_outreach(user["id"], outreach["id"])
+        elif meeting:
             created = await _schedule_google_meeting(user["id"], meeting)
             await db.meetings.update_one({"id": meeting["id"]}, {"$set": {**created, "status": "scheduled"}})
         else:
+            await db.tasks.update_one({"id": appr["task_id"]}, {"$set": {
+                "status": "planning", "progress": 25, "execution_status": "queued", "updated_at": now,
+            }})
             await fire_automations(user["id"], "approval_approved", {"approval_id": approval_id, "task_id": appr["task_id"]})
     else:
-        await db.meetings.update_one({"id": appr["task_id"], "user_id": user["id"]}, {"$set": {"status": "cancelled"}})
+        if outreach:
+            await db.outreach.update_one({"id": outreach["id"]}, {"$set": {"status": "rejected", "updated_at": now}})
+            await db.leads.update_one({"id": outreach["lead_id"]}, {"$set": {"pipeline_stage": "verified", "updated_at": now}})
+        elif meeting:
+            await db.meetings.update_one({"id": meeting["id"]}, {"$set": {"status": "cancelled"}})
+        else:
+            await db.tasks.update_one({"id": appr["task_id"]}, {"$set": {
+                "status": "cancelled", "progress": 0, "execution_status": "cancelled", "updated_at": now,
+            }})
+    await db.approvals.update_one({"id": approval_id}, {"$set": {"status": body.decision, "decided_at": now}})
+    verb = "approved" if body.decision == "approved" else "rejected"
+    await log_activity(user["id"], appr["agent_id"], f"Founder {verb}: {appr['action']}", "approval")
     return {"ok": True}
 
 
@@ -884,7 +901,7 @@ async def dashboard_stats(user: dict = Depends(current_user)):
         "goals_running": goals_running,
         "approvals_pending": approvals_pending,
         "reports_generated": completed,  # proxy
-        "leads_researched": await db.tasks.count_documents({"user_id": uid, "agent_id": "sales"}),
+        "leads_researched": await db.leads.count_documents({"user_id": uid}),
         "content_created": await db.tasks.count_documents({"user_id": uid, "agent_id": "marketing"}),
         "projects_running": goals_running,
         "total_tasks": total_tasks,
@@ -1301,6 +1318,18 @@ async def sync_google_replies(user: dict = Depends(current_user)):
                 {"$set": doc, "$setOnInsert": {"id": str(uuid.uuid4()), "created_at": datetime.now(timezone.utc)}},
                 upsert=True,
             )
+            sender_email = parseaddr(metadata.get("from") or "")[1].lower()
+            lead = await db.leads.find_one({"user_id": user["id"], "email": sender_email}, {"_id": 0}) if sender_email else None
+            if lead:
+                snippet = (data.get("snippet") or "").lower()
+                opted_out = any(phrase in snippet for phrase in ("unsubscribe", "do not contact", "stop emailing", "not interested"))
+                await db.leads.update_one({"id": lead["id"]}, {"$set": {
+                    "pipeline_stage": "replied", "reply_received_at": doc["received_at"],
+                    "do_not_contact": opted_out or lead.get("do_not_contact", False), "updated_at": datetime.now(timezone.utc),
+                }})
+                await db.outreach.update_many({"user_id": user["id"], "lead_id": lead["id"], "status": "sent"}, {"$set": {
+                    "reply_detected": True, "reply_message_id": data["id"], "next_followup_at": None,
+                }})
             synced += 1
     await log_activity(user["id"], "sales", f"Gmail synced {synced} recent inbox messages", "integration")
     return {"ok": True, "synced": synced}
@@ -1594,6 +1623,180 @@ async def enrich_live_leads(body: LeadEnrichIn, user: dict = Depends(current_use
         enriched.append({"lead_id": lead["id"], "company_name": lead["company_name"], **update})
     await log_activity(user["id"], "research", f"Enriched {len(enriched)} leads with public website and Hunter evidence", "lead")
     return {"count": len(enriched), "leads": enriched}
+
+
+# ============================================================
+# ROUTES: APPROVAL-GATED REAL OUTREACH
+# ============================================================
+async def _send_outreach(user_id: str, outreach_id: str) -> dict:
+    outreach = await db.outreach.find_one({"id": outreach_id, "user_id": user_id}, {"_id": 0})
+    if not outreach:
+        raise HTTPException(404, "Outreach not found")
+    if outreach.get("status") == "sent":
+        return outreach
+    if outreach.get("status") != "pending_approval":
+        raise HTTPException(409, "Outreach is not ready to send")
+    lead = await db.leads.find_one({"id": outreach["lead_id"], "user_id": user_id}, {"_id": 0})
+    if not lead or not lead.get("email"):
+        raise HTTPException(400, "Lead has no public email")
+    if lead.get("do_not_contact"):
+        raise HTTPException(400, "Lead is on the do-not-contact list")
+    if lead.get("email_verification_status") != "verified":
+        raise HTTPException(400, "Only verified emails can be contacted")
+    day_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    sent_today = await db.outreach.count_documents({"user_id": user_id, "status": "sent", "sent_at": {"$gte": day_start}})
+    if sent_today >= DAILY_EMAIL_LIMIT:
+        raise HTTPException(429, f"Daily email safety limit reached ({DAILY_EMAIL_LIMIT})")
+    message_id = await smtp_send(lead["email"], outreach["subject"], outreach["body"])
+    now = datetime.now(timezone.utc)
+    await db.outreach.update_one({"id": outreach_id}, {"$set": {
+        "status": "sent", "message_id": message_id, "sent_at": now,
+        "next_followup_at": now + timedelta(days=3), "updated_at": now,
+    }})
+    await db.leads.update_one({"id": lead["id"]}, {"$set": {
+        "pipeline_stage": "contacted", "last_contacted_at": now,
+        "last_outreach_id": outreach_id, "updated_at": now,
+    }})
+    await db.email_events.insert_one({
+        "id": str(uuid.uuid4()), "user_id": user_id, "kind": "outreach_sent",
+        "lead_id": lead["id"], "outreach_id": outreach_id, "to_email": lead["email"],
+        "message_id": message_id, "status": "sent", "created_at": now,
+    })
+    await log_activity(user_id, "sales", f"Approved outreach sent to {lead['company_name']} · evidence {message_id}", "outreach")
+    return await db.outreach.find_one({"id": outreach_id}, {"_id": 0})
+
+
+@api.post("/outreach/draft")
+async def create_outreach_draft(body: OutreachDraftIn, user: dict = Depends(current_user)):
+    lead = await db.leads.find_one({"id": body.lead_id, "user_id": user["id"]}, {"_id": 0})
+    if not lead:
+        raise HTTPException(404, "Lead not found")
+    if lead.get("do_not_contact"):
+        raise HTTPException(400, "Lead is on the do-not-contact list")
+    if not lead.get("email") or lead.get("email_verification_status") != "verified":
+        raise HTTPException(400, "A verified public business email is required")
+    duplicate = await db.outreach.find_one({
+        "user_id": user["id"], "lead_id": lead["id"], "status": {"$in": ["pending_approval", "sent"]},
+    }, {"_id": 0})
+    if duplicate:
+        raise HTTPException(409, "This lead already has pending or sent outreach")
+    prompt = (
+        "Write one concise, genuinely personalized B2B cold email from UnnatiX Technologies. "
+        "Return strict JSON with keys subject and body only. Body must be under 170 words, plain text, respectful, "
+        "mention only supplied facts, offer a useful low-friction audit, include one clear 15-minute-call CTA, "
+        "and end with 'If this is not relevant, reply no and I will not follow up.' Never invent results or clients.\n\n"
+        f"Company: {lead.get('company_name')}\nIndustry: {lead.get('industry')}\nLocation: {lead.get('location')}\n"
+        f"Website: {lead.get('website')}\nPublic source: {(lead.get('source_urls') or [''])[0]}\n"
+        f"Offer: {body.offer_context}\nSender: Arjun Mehta, UnnatiX Technologies"
+    )
+    raw = await llm_complete(AGENT_SYSTEM_PROMPTS["sales"], prompt, expect_json=True)
+    try:
+        draft = json.loads(raw)
+        subject = str(draft["subject"]).strip()[:160]
+        email_body = str(draft["body"]).strip()[:4000]
+    except Exception:
+        raise HTTPException(502, "AI returned an invalid outreach draft")
+    now = datetime.now(timezone.utc)
+    outreach_id, approval_id = str(uuid.uuid4()), str(uuid.uuid4())
+    outreach = {
+        "id": outreach_id, "user_id": user["id"], "lead_id": lead["id"],
+        "to_email": lead["email"], "company_name": lead["company_name"],
+        "subject": subject, "body": email_body, "status": "pending_approval",
+        "followup_number": 0, "approval_id": approval_id, "created_at": now, "updated_at": now,
+    }
+    approval = {
+        "id": approval_id, "user_id": user["id"], "task_id": outreach_id, "agent_id": "sales",
+        "action": f"Send real email to {lead['company_name']}",
+        "impact": f"Will send from {SMTP_FROM_EMAIL} to verified address {lead['email']}.",
+        "payload_preview": f"TO: {lead['email']}\nSUBJECT: {subject}\n\n{email_body}",
+        "status": "pending", "kind": "outreach_send", "created_at": now,
+    }
+    await db.outreach.insert_one(outreach)
+    await db.approvals.insert_one(approval)
+    await db.leads.update_one({"id": lead["id"]}, {"$set": {"pipeline_stage": "awaiting_approval", "updated_at": now}})
+    await log_activity(user["id"], "sales", f"Personalized outreach ready for approval: {lead['company_name']}", "approval")
+    outreach.pop("_id", None)
+    return outreach
+
+
+@api.get("/outreach")
+async def list_outreach(user: dict = Depends(current_user)):
+    return await db.outreach.find({"user_id": user["id"]}, {"_id": 0}).sort("created_at", -1).to_list(300)
+
+
+@api.post("/outreach/queue-followups")
+async def queue_due_followups(user: dict = Depends(current_user)):
+    now = datetime.now(timezone.utc)
+    due = await db.outreach.find({
+        "user_id": user["id"], "status": "sent", "reply_detected": {"$ne": True},
+        "next_followup_at": {"$lte": now}, "followup_number": {"$lt": 2}, "followup_queued": {"$ne": True},
+    }, {"_id": 0}).limit(10).to_list(10)
+    queued = 0
+    for original in due:
+        lead = await db.leads.find_one({"id": original["lead_id"], "do_not_contact": {"$ne": True}}, {"_id": 0})
+        if not lead or lead.get("pipeline_stage") == "replied":
+            continue
+        followup_id, approval_id = str(uuid.uuid4()), str(uuid.uuid4())
+        number = int(original.get("followup_number", 0)) + 1
+        followup_body = (
+            f"Hi,\n\nJust following up on my note about {lead['company_name']}. "
+            "Would a short digital growth audit be useful? If not, reply no and I will not follow up.\n\n"
+            "Regards,\nArjun Mehta\nUnnatiX Technologies"
+        )
+        doc = {**{k: original.get(k) for k in ("user_id", "lead_id", "to_email", "company_name")},
+               "id": followup_id, "subject": f"Re: {original['subject']}", "body": followup_body,
+               "status": "pending_approval", "followup_number": number, "parent_outreach_id": original["id"],
+               "approval_id": approval_id, "created_at": now, "updated_at": now}
+        await db.outreach.insert_one(doc)
+        await db.approvals.insert_one({
+            "id": approval_id, "user_id": user["id"], "task_id": followup_id, "agent_id": "sales",
+            "action": f"Send follow-up #{number} to {lead['company_name']}",
+            "impact": "Will send only after founder approval; no reply has been detected.",
+            "payload_preview": f"TO: {lead['email']}\nSUBJECT: {doc['subject']}\n\n{followup_body}",
+            "status": "pending", "kind": "outreach_send", "created_at": now,
+        })
+        await db.outreach.update_one({"id": original["id"]}, {"$set": {"followup_queued": True}})
+        queued += 1
+    return {"queued": queued}
+
+
+@api.post("/worker/tick")
+async def autonomous_worker_tick(request: Request):
+    supplied = request.headers.get("authorization", "").removeprefix("Bearer ").strip()
+    if not CRON_SECRET or not hmac.compare_digest(supplied, CRON_SECRET):
+        raise HTTPException(401, "Invalid worker authorization")
+    user_ids = set()
+    async for rec in db.integrations.find({"id": "google_workspace", "status": "connected_live"}, {"user_id": 1}):
+        user_ids.add(rec["user_id"])
+    async for task in db.tasks.find({"status": "planning"}, {"user_id": 1}).limit(20):
+        user_ids.add(task["user_id"])
+    report = {"users": 0, "gmail_synced": 0, "followups_queued": 0, "tasks_run": 0, "errors": []}
+    for user_id in list(user_ids)[:10]:
+        user = await db.users.find_one({"id": user_id}, {"_id": 0})
+        if not user:
+            continue
+        report["users"] += 1
+        try:
+            integration = await db.integrations.find_one({"user_id": user_id, "id": "google_workspace", "status": "connected_live"})
+            if integration:
+                synced = await sync_google_replies(user)
+                report["gmail_synced"] += int(synced.get("synced", 0))
+        except Exception as exc:
+            report["errors"].append(f"gmail:{user_id}:{type(exc).__name__}")
+        try:
+            queued = await queue_due_followups(user)
+            report["followups_queued"] += int(queued.get("queued", 0))
+        except Exception as exc:
+            report["errors"].append(f"followup:{user_id}:{type(exc).__name__}")
+        try:
+            task = await db.tasks.find_one({"user_id": user_id, "status": "planning"}, {"_id": 0}, sort=[("created_at", 1)])
+            if task and task.get("goal_id") not in {"adhoc", "automation"}:
+                result = await run_next_goal_task(task["goal_id"], user)
+                report["tasks_run"] += 1 if result.get("processed") else 0
+        except Exception as exc:
+            report["errors"].append(f"task:{user_id}:{type(exc).__name__}")
+    report["ran_at"] = datetime.now(timezone.utc).isoformat()
+    return report
 
 
 # ============================================================
