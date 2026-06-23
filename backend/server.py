@@ -6,8 +6,13 @@ import asyncio
 import json
 import smtplib
 import ssl
+import re
+import socket
+import ipaddress
 from email.message import EmailMessage
 from email.utils import formataddr, make_msgid
+from urllib.parse import urljoin, urlparse
+from urllib.robotparser import RobotFileParser
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import List, Optional, Literal
@@ -43,6 +48,7 @@ SMTP_FROM_EMAIL = os.environ.get("SMTP_FROM_EMAIL", SMTP_USER)
 SMTP_FROM_NAME = os.environ.get("SMTP_FROM_NAME", "UnnatiX Technologies")
 SMTP_SECURITY = os.environ.get("SMTP_SECURITY", "starttls").lower()
 GOOGLE_PLACES_API_KEY = os.environ.get("GOOGLE_PLACES_API_KEY", "")
+HUNTER_API_KEY = os.environ.get("HUNTER_API_KEY", "")
 LLM_PROVIDER_ORDER = [
     p.strip().lower()
     for p in os.environ.get("LLM_PROVIDER_ORDER", "openai,anthropic,gemini").split(",")
@@ -299,6 +305,12 @@ class LeadSearchIn(BaseModel):
     query: str = Field(min_length=2, max_length=160)
     location: str = Field(default="Delhi NCR", min_length=2, max_length=100)
     max_results: int = Field(default=10, ge=1, le=20)
+
+
+class LeadEnrichIn(BaseModel):
+    lead_id: Optional[str] = None
+    limit: int = Field(default=1, ge=1, le=10)
+    verify_email: bool = True
 
 
 class KnowledgeFileIn(BaseModel):
@@ -1250,6 +1262,169 @@ async def search_live_leads(body: LeadSearchIn, user: dict = Depends(current_use
 @api.get("/leads")
 async def list_live_leads(user: dict = Depends(current_user)):
     return await db.leads.find({"user_id": user["id"]}, {"_id": 0}).sort("created_at", -1).to_list(500)
+
+
+EMAIL_RE = re.compile(r"[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}", re.IGNORECASE)
+
+
+async def _public_web_url(url: str) -> bool:
+    try:
+        parsed = urlparse(url)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            return False
+        addresses = await asyncio.to_thread(socket.getaddrinfo, parsed.hostname, None)
+        for item in addresses:
+            ip = ipaddress.ip_address(item[4][0])
+            if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast:
+                return False
+        return True
+    except Exception:
+        return False
+
+
+def _clean_public_emails(html: str) -> List[str]:
+    blocked = {"example.com", "sentry.io", "wixpress.com", "cloudflare.com"}
+    found = []
+    for email in EMAIL_RE.findall(html.replace("&#64;", "@").replace("[at]", "@")):
+        email = email.lower().strip(".,;:()[]<>'\"")
+        domain = email.rsplit("@", 1)[-1]
+        if domain in blocked or email.endswith((".png", ".jpg", ".jpeg", ".webp", ".svg")):
+            continue
+        if email not in found:
+            found.append(email)
+    return found[:10]
+
+
+async def _crawl_public_contacts(website: str) -> dict:
+    root = website if website.startswith(("http://", "https://")) else f"https://{website}"
+    if not await _public_web_url(root):
+        return {"emails": [], "sources": [], "error": "unsafe_or_invalid_url"}
+    parsed = urlparse(root)
+    robots_url = f"{parsed.scheme}://{parsed.netloc}/robots.txt"
+    user_agent = "UnnatiXLeadResearchBot/1.0"
+    parser = RobotFileParser()
+    parser.set_url(robots_url)
+    async with httpx.AsyncClient(timeout=12, follow_redirects=True, headers={"User-Agent": user_agent}) as http:
+        try:
+            robots = await http.get(robots_url)
+            if robots.status_code < 400:
+                parser.parse(robots.text.splitlines())
+            else:
+                parser.parse([])
+        except Exception:
+            parser.parse([])
+        queue = [root]
+        visited, emails, sources = set(), [], []
+        while queue and len(visited) < 5:
+            url = queue.pop(0)
+            if url in visited or not parser.can_fetch(user_agent, url):
+                continue
+            visited.add(url)
+            try:
+                response = await http.get(url)
+                if response.status_code >= 400 or "text/html" not in response.headers.get("content-type", ""):
+                    continue
+                if not await _public_web_url(str(response.url)):
+                    continue
+                page_emails = _clean_public_emails(response.text)
+                for email in page_emails:
+                    if email not in emails:
+                        emails.append(email)
+                        sources.append({"email": email, "url": str(response.url), "method": "public_website"})
+                if len(visited) == 1:
+                    for href in re.findall(r"href\s*=\s*['\"]([^'\"]+)['\"]", response.text, re.IGNORECASE):
+                        absolute = urljoin(str(response.url), href.split("#")[0])
+                        target = urlparse(absolute)
+                        if target.netloc == urlparse(str(response.url)).netloc and any(
+                            word in target.path.lower() for word in ("contact", "about", "team")
+                        ) and absolute not in queue:
+                            queue.append(absolute)
+            except Exception:
+                continue
+    return {"emails": emails[:10], "sources": sources[:10], "pages_checked": len(visited)}
+
+
+async def _hunter_domain_email(domain: str) -> dict:
+    if not HUNTER_API_KEY:
+        return {"email": None, "sources": [], "status": "not_configured"}
+    async with httpx.AsyncClient(timeout=20) as http:
+        response = await http.get("https://api.hunter.io/v2/domain-search", params={
+            "domain": domain, "limit": 10, "api_key": HUNTER_API_KEY,
+        })
+    if response.status_code >= 400:
+        logger.warning("Hunter domain search failed: %s", response.status_code)
+        return {"email": None, "sources": [], "status": f"http_{response.status_code}"}
+    data = response.json().get("data") or {}
+    candidates = data.get("emails") or []
+    candidates.sort(key=lambda x: (x.get("type") != "generic", -(x.get("confidence") or 0)))
+    if not candidates:
+        return {"email": None, "sources": [], "status": "not_found"}
+    best = candidates[0]
+    return {
+        "email": best.get("value"), "confidence": best.get("confidence"),
+        "sources": [s.get("uri") for s in (best.get("sources") or []) if s.get("uri")][:5],
+        "status": "found", "first_name": best.get("first_name"),
+        "last_name": best.get("last_name"), "position": best.get("position"),
+    }
+
+
+async def _hunter_verify_email(email: str) -> dict:
+    if not HUNTER_API_KEY:
+        return {"status": "unknown", "result": "not_configured"}
+    async with httpx.AsyncClient(timeout=25) as http:
+        response = await http.get("https://api.hunter.io/v2/email-verifier", params={
+            "email": email, "api_key": HUNTER_API_KEY,
+        })
+    if response.status_code >= 400:
+        logger.warning("Hunter verification failed: %s", response.status_code)
+        return {"status": "unknown", "result": f"http_{response.status_code}"}
+    data = response.json().get("data") or {}
+    status = data.get("status") or "unknown"
+    result = data.get("result") or "unknown"
+    mapped = "verified" if result == "deliverable" or status == "valid" else (
+        "invalid" if result == "undeliverable" or status == "invalid" else
+        "risky" if result == "risky" or status in {"accept_all", "disposable"} else "unknown"
+    )
+    return {"status": mapped, "provider_status": status, "result": result, "score": data.get("score")}
+
+
+@api.post("/leads/enrich")
+async def enrich_live_leads(body: LeadEnrichIn, user: dict = Depends(current_user)):
+    query = {"user_id": user["id"], "website": {"$nin": [None, ""]}}
+    if body.lead_id:
+        query["id"] = body.lead_id
+    else:
+        query["email_verification_status"] = {"$in": ["not_found", "unknown", None]}
+    leads = await db.leads.find(query, {"_id": 0}).sort("created_at", -1).to_list(body.limit)
+    enriched = []
+    for lead in leads:
+        crawl = await _crawl_public_contacts(lead["website"])
+        email = (crawl.get("emails") or [None])[0]
+        method = "public_website" if email else None
+        evidence = crawl.get("sources") or []
+        hunter = {}
+        if not email:
+            domain = (urlparse(lead["website"]).hostname or "").removeprefix("www.")
+            hunter = await _hunter_domain_email(domain)
+            email = hunter.get("email")
+            if email:
+                method = "hunter_domain_search"
+                evidence.extend({"email": email, "url": url, "method": method} for url in hunter.get("sources", []))
+        verification = await _hunter_verify_email(email) if email and body.verify_email else {"status": "unverified"}
+        update = {
+            "email": email, "email_source": method,
+            "email_verification_status": verification.get("status", "unknown"),
+            "email_verification": verification, "contact_evidence": evidence,
+            "outreach_eligibility": "eligible_for_approval" if verification.get("status") == "verified" else "manual_review",
+            "enriched_at": datetime.now(timezone.utc), "updated_at": datetime.now(timezone.utc),
+        }
+        if hunter.get("first_name") or hunter.get("last_name"):
+            update["contact_name"] = " ".join(filter(None, [hunter.get("first_name"), hunter.get("last_name")]))
+            update["contact_role"] = hunter.get("position")
+        await db.leads.update_one({"id": lead["id"], "user_id": user["id"]}, {"$set": update})
+        enriched.append({"lead_id": lead["id"], "company_name": lead["company_name"], **update})
+    await log_activity(user["id"], "research", f"Enriched {len(enriched)} leads with public website and Hunter evidence", "lead")
+    return {"count": len(enriched), "leads": enriched}
 
 
 # ============================================================
