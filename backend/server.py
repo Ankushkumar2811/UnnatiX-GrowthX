@@ -996,15 +996,139 @@ async def llm_generate_output(agent_id: str, task: dict, knowledge: List[dict]) 
     return await llm_complete(sys_prompt, user_prompt)
 
 
+LEAD_INDUSTRY_ALIASES = [
+    ("dental clinics", ("dental", "dentist", "दंत", "डेंटल")),
+    ("medical clinics", ("clinic", "doctor", "hospital", "क्लिनिक", "डॉक्टर", "अस्पताल")),
+    ("coaching institutes", ("coaching", "institute", "education", "school", "कोचिंग", "शिक्षा", "स्कूल")),
+    ("real estate agencies", ("real estate", "property", "realtor", "प्रॉपर्टी", "जायदाद")),
+    ("restaurants", ("restaurant", "cafe", "food business", "रेस्टोरेंट", "कैफे", "ढाबा")),
+    ("salons and spas", ("salon", "beauty", "spa", "सैलून", "ब्यूटी")),
+    ("gyms and fitness centres", ("gym", "fitness", "जिम", "फिटनेस")),
+    ("manufacturing companies", ("manufacturer", "manufacturing", "factory", "industrial", "निर्माता", "फैक्ट्री")),
+    ("professional services firms", ("professional service", "lawyer", "consultant", "chartered accountant", "वकील", "कंसल्टेंट")),
+]
+
+DELHI_NCR_LEAD_LOCATIONS = [
+    "Connaught Place Delhi", "South Delhi", "Dwarka Delhi", "Rohini Delhi", "Pitampura Delhi",
+    "Janakpuri Delhi", "Lajpat Nagar Delhi", "Saket Delhi", "Karol Bagh Delhi", "Preet Vihar Delhi",
+    "Noida Sector 18", "Noida Sector 62", "Greater Noida", "Indirapuram Ghaziabad", "Vaishali Ghaziabad",
+    "Gurugram Sector 14", "Gurugram Sector 29", "Gurugram Golf Course Road", "Faridabad", "Bahadurgarh",
+]
+
+
+def _lead_campaign_spec(objective: str) -> dict:
+    """Understand English, Hindi or Hinglish briefs and create a deterministic search matrix."""
+    text = objective.casefold()
+    queries = [query for query, aliases in LEAD_INDUSTRY_ALIASES if any(alias.casefold() in text for alias in aliases)]
+    if not queries:
+        queries = ["dental clinics", "real estate agencies", "coaching institutes"]
+    target_match = re.search(
+        r"(\d[\d,]*)\s*(?:real\s+)?(?:business(?:es)?|client(?:s)?|lead(?:s)?|prospect(?:s)?|लीड|क्लाइंट|व्यवसाय)",
+        text,
+    )
+    target = int(target_match.group(1).replace(",", "")) if target_match else 50
+    target = max(1, min(target, 5000))
+    delhi_ncr = any(term in text for term in ("delhi", "ncr", "दिल्ली", "नोएडा", "गुरुग्राम", "गुड़गांव"))
+    locations = DELHI_NCR_LEAD_LOCATIONS if delhi_ncr else ["Delhi NCR"]
+    matrix = [{"query": query, "location": location} for query in queries for location in locations]
+    return {"target": target, "queries": queries, "locations": locations, "matrix": matrix,
+            "brief_language": "multilingual", "requested_objective": objective}
+
+
 def _prospect_queries(objective: str) -> List[str]:
-    text = objective.lower()
-    if "dental" in text or "dentist" in text:
-        return ["dental clinics"]
-    if "real estate" in text:
-        return ["real estate agencies", "property developers"]
-    if "education" in text or "coaching" in text:
-        return ["coaching institutes", "private schools"]
-    return ["dental clinics", "real estate agencies", "coaching institutes"]
+    """Compatibility helper for legacy one-shot task records."""
+    return _lead_campaign_spec(objective)["queries"]
+
+
+async def _ensure_lead_campaign(task: dict, user: dict, objective: str) -> dict:
+    existing = await db.lead_campaigns.find_one(
+        {"user_id": user["id"], "task_id": task["id"]}, {"_id": 0},
+    )
+    if existing:
+        return existing
+    spec = _lead_campaign_spec(objective)
+    now = datetime.now(timezone.utc)
+    campaign = {
+        "id": str(uuid.uuid4()), "user_id": user["id"], "goal_id": task.get("goal_id"),
+        "task_id": task["id"], "objective": objective, "target": spec["target"],
+        "queries": spec["queries"], "locations": spec["locations"], "matrix": spec["matrix"],
+        "cursor": 0, "searches_completed": 0, "unique_leads": 0, "verified_leads": 0,
+        "approvals_queued": 0, "seen_place_ids": [], "status": "active",
+        "brief_language": spec["brief_language"], "lock_until": now + timedelta(minutes=10),
+        "created_at": now, "updated_at": now,
+    }
+    await db.lead_campaigns.insert_one(campaign)
+    campaign.pop("_id", None)
+    return campaign
+
+
+async def _run_lead_campaign_batch(campaign: dict, user: dict) -> dict:
+    matrix = campaign.get("matrix") or []
+    cursor = int(campaign.get("cursor", 0))
+    target = int(campaign.get("target", 50))
+    unique_total = int(campaign.get("unique_leads", 0))
+    if unique_total >= target or cursor >= len(matrix):
+        final_status = "completed" if unique_total >= target else "search_space_exhausted"
+        await db.lead_campaigns.update_one(
+            {"id": campaign["id"]}, {"$set": {"status": final_status, "updated_at": datetime.now(timezone.utc)},
+                                     "$unset": {"lock_until": ""}},
+        )
+        return {"campaign_id": campaign["id"], "status": final_status, "new_leads": 0}
+
+    search = matrix[cursor]
+    result = await search_live_leads(LeadSearchIn(
+        query=search["query"], location=search["location"], max_results=min(20, target - unique_total), kind="prospect"
+    ), user)
+    seen = set(campaign.get("seen_place_ids") or [])
+    new_leads = []
+    new_place_ids = []
+    now = datetime.now(timezone.utc)
+    for lead in result.get("leads", []):
+        dedupe_key = lead.get("place_id") or lead.get("id")
+        if not dedupe_key or dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+        new_place_ids.append(dedupe_key)
+        new_leads.append(lead)
+        await db.leads.update_one({"id": lead["id"], "user_id": user["id"]}, {"$set": {
+            "discovered_by": "sales_agent", "discovery_campaign_id": campaign["id"],
+            "discovery_goal_id": campaign.get("goal_id"), "discovery_task_id": campaign.get("task_id"),
+            "discovery_query": search["query"], "discovery_location": search["location"],
+            "discovery_run_at": now,
+        }, "$addToSet": {"campaign_ids": campaign["id"]}})
+
+    verified_count = 0
+    approvals_count = 0
+    for lead in new_leads[:2]:
+        if not lead.get("website"):
+            continue
+        enriched = await enrich_live_leads(LeadEnrichIn(lead_id=lead["id"], limit=1, verify_email=True), user)
+        updated = (enriched.get("leads") or [None])[0]
+        if not updated or updated.get("email_verification_status") != "verified":
+            continue
+        verified_count += 1
+        try:
+            await _queue_deterministic_outreach(user, updated)
+            approvals_count += 1
+        except HTTPException as exc:
+            if exc.status_code != 409:
+                raise
+
+    next_cursor = cursor + 1
+    next_unique = unique_total + len(new_leads)
+    final_status = "completed" if next_unique >= target else (
+        "search_space_exhausted" if next_cursor >= len(matrix) else "active"
+    )
+    update = {"cursor": next_cursor, "searches_completed": int(campaign.get("searches_completed", 0)) + 1,
+              "unique_leads": next_unique, "status": final_status, "last_query": search["query"],
+              "last_location": search["location"], "last_batch_new": len(new_leads), "updated_at": now}
+    await db.lead_campaigns.update_one({"id": campaign["id"]}, {
+        "$set": update, "$inc": {"verified_leads": verified_count, "approvals_queued": approvals_count},
+        "$addToSet": {"seen_place_ids": {"$each": new_place_ids}}, "$unset": {"lock_until": ""},
+    })
+    return {"campaign_id": campaign["id"], "status": final_status, "new_leads": len(new_leads),
+            "unique_leads": next_unique, "target": target, "verified": verified_count,
+            "approvals_queued": approvals_count, "query": search["query"], "location": search["location"]}
 
 
 async def execute_agent_task(task: dict, user: dict, knowledge: List[dict]) -> dict:
@@ -1030,6 +1154,23 @@ async def execute_agent_task(task: dict, user: dict, knowledge: List[dict]) -> d
         return {"output": "\n".join(lines), "execution_status": "executed_with_evidence", "evidence": evidence}
 
     if task.get("agent_id") == "sales" and any(x in title_text for x in ("prospect", "lead list", "qualified", "target list")):
+        campaign = await _ensure_lead_campaign(task, user, objective)
+        batch_result = await _run_lead_campaign_batch(campaign, user)
+        output = (
+            "## Persistent real-lead campaign started\n\n"
+            f"Target: {campaign['target']} unique businesses\n"
+            f"Search matrix: {len(campaign.get('queries', []))} industries x {len(campaign.get('locations', []))} locations\n"
+            f"Current batch: {batch_result.get('query', 'complete')} in {batch_result.get('location', 'search space')}\n"
+            f"New unique leads: {batch_result.get('new_leads', 0)}\n"
+            f"Campaign total: {batch_result.get('unique_leads', campaign.get('unique_leads', 0))}/{campaign['target']}\n"
+            f"Verified-email approvals queued: {batch_result.get('approvals_queued', 0)}\n\n"
+            "The autonomous worker continues with the next unused industry/location combination every run. "
+            "Google place IDs are deduplicated, evidence URLs are saved, and no email is sent without founder approval."
+        )
+        execution_status = "campaign_running" if batch_result.get("status") == "active" else batch_result.get("status", "campaign_running")
+        return {"output": output, "execution_status": execution_status, "evidence": [batch_result["campaign_id"]]}
+
+        # Legacy one-shot discovery retained below for migration safety; the persistent campaign returns above.
         found = []
         for query in _prospect_queries(objective):
             result = await search_live_leads(LeadSearchIn(
@@ -1578,9 +1719,14 @@ async def search_live_leads(body: LeadSearchIn, user: dict = Depends(current_use
             "outreach_eligibility": "needs_public_contact", "do_not_contact": False,
             "retrieved_at": now, "updated_at": now,
         }
+        protected = {"email", "contact_name", "contact_role", "email_verification_status",
+                     "pipeline_stage", "outreach_eligibility", "do_not_contact"}
+        public_refresh = {key: value for key, value in lead.items() if key not in protected}
+        insert_defaults = {key: lead[key] for key in protected}
+        insert_defaults.update({"id": str(uuid.uuid4()), "created_at": now})
         await db.leads.update_one(
             {"user_id": user["id"], "place_id": place_id},
-            {"$set": lead, "$setOnInsert": {"id": str(uuid.uuid4()), "created_at": now}},
+            {"$set": public_refresh, "$setOnInsert": insert_defaults},
             upsert=True,
         )
         saved = await db.leads.find_one({"user_id": user["id"], "place_id": place_id}, {"_id": 0})
@@ -1626,7 +1772,11 @@ async def live_sales_agent_discovery(user: dict = Depends(current_user)):
     leads = await db.leads.find(
         {"user_id": user["id"], "discovered_by": "sales_agent"}, {"_id": 0},
     ).sort("discovery_run_at", -1).limit(500).to_list(500)
-    return {"runs": runs, "leads": leads, "updated_at": datetime.now(timezone.utc)}
+    campaigns = await db.lead_campaigns.find(
+        {"user_id": user["id"]}, {"_id": 0, "matrix": 0, "seen_place_ids": 0},
+    ).sort("updated_at", -1).limit(20).to_list(20)
+    return {"runs": runs, "campaigns": campaigns, "leads": leads,
+            "updated_at": datetime.now(timezone.utc)}
 
 
 EMAIL_RE = re.compile(r"[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}", re.IGNORECASE)
@@ -2048,7 +2198,10 @@ async def autonomous_worker_tick(request: Request):
         user_ids.add(rec["user_id"])
     async for task in db.tasks.find({"status": "planning"}, {"user_id": 1}).limit(20):
         user_ids.add(task["user_id"])
-    report = {"users": 0, "gmail_synced": 0, "followups_queued": 0, "tasks_run": 0, "errors": []}
+    async for campaign in db.lead_campaigns.find({"status": "active"}, {"user_id": 1}).limit(20):
+        user_ids.add(campaign["user_id"])
+    report = {"users": 0, "gmail_synced": 0, "followups_queued": 0, "tasks_run": 0,
+              "lead_campaign_batches": 0, "new_leads": 0, "errors": []}
     for user_id in list(user_ids)[:10]:
         user = await db.users.find_one({"id": user_id}, {"_id": 0})
         if not user:
@@ -2066,6 +2219,28 @@ async def autonomous_worker_tick(request: Request):
             report["followups_queued"] += int(queued.get("queued", 0))
         except Exception as exc:
             report["errors"].append(f"followup:{user_id}:{type(exc).__name__}")
+        campaign = None
+        try:
+            now = datetime.now(timezone.utc)
+            campaign = await db.lead_campaigns.find_one_and_update(
+                {"user_id": user_id, "status": "active", "$or": [
+                    {"lock_until": {"$exists": False}}, {"lock_until": {"$lte": now}},
+                ]},
+                {"$set": {"lock_until": now + timedelta(minutes=10), "last_attempt_at": now}},
+                sort=[("updated_at", 1)], return_document=True,
+            )
+            if campaign:
+                campaign.pop("_id", None)
+                batch = await _run_lead_campaign_batch(campaign, user)
+                report["lead_campaign_batches"] += 1
+                report["new_leads"] += int(batch.get("new_leads", 0))
+        except Exception as exc:
+            if campaign:
+                await db.lead_campaigns.update_one(
+                    {"id": campaign["id"]},
+                    {"$unset": {"lock_until": ""}, "$set": {"last_error": type(exc).__name__, "updated_at": datetime.now(timezone.utc)}},
+                )
+            report["errors"].append(f"lead_campaign:{user_id}:{type(exc).__name__}")
         try:
             task = await db.tasks.find_one({"user_id": user_id, "status": "planning"}, {"_id": 0}, sort=[("created_at", 1)])
             if task and task.get("goal_id") not in {"adhoc", "automation"}:
