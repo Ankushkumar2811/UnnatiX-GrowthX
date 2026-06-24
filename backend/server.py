@@ -330,6 +330,10 @@ class LeadEnrichIn(BaseModel):
     verify_email: bool = True
 
 
+class LeadCampaignTargetIn(BaseModel):
+    target: int = Field(ge=1, le=5000)
+
+
 class OutreachDraftIn(BaseModel):
     lead_id: str
     offer_context: str = Field(default="Free 20-minute digital growth audit", max_length=300)
@@ -1808,6 +1812,21 @@ async def live_sales_agent_discovery(user: dict = Depends(current_user)):
             "updated_at": datetime.now(timezone.utc)}
 
 
+@api.patch("/lead-campaigns/{campaign_id}/target")
+async def update_lead_campaign_target(campaign_id: str, body: LeadCampaignTargetIn,
+                                      user: dict = Depends(current_user)):
+    campaign = await db.lead_campaigns.find_one(
+        {"id": campaign_id, "user_id": user["id"]}, {"_id": 0},
+    )
+    if not campaign:
+        raise HTTPException(404, "Lead campaign not found")
+    status_value = "completed" if int(campaign.get("unique_leads", 0)) >= body.target else "active"
+    await db.lead_campaigns.update_one({"id": campaign_id}, {"$set": {
+        "target": body.target, "status": status_value, "updated_at": datetime.now(timezone.utc),
+    }})
+    return {"ok": True, "campaign_id": campaign_id, "target": body.target, "status": status_value}
+
+
 EMAIL_RE = re.compile(r"[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}", re.IGNORECASE)
 
 
@@ -2227,9 +2246,7 @@ async def autonomous_worker_tick(request: Request):
         user_ids.add(rec["user_id"])
     async for task in db.tasks.find({"status": "planning"}, {"user_id": 1}).limit(20):
         user_ids.add(task["user_id"])
-    campaign_work_query = {"$or": [
-        {"status": "active"}, {"pending_enrichment_ids.0": {"$exists": True}},
-    ]}
+    campaign_work_query = {"status": "active"}
     async for campaign in db.lead_campaigns.find(campaign_work_query, {"user_id": 1}).limit(20):
         user_ids.add(campaign["user_id"])
     report = {"users": 0, "gmail_synced": 0, "followups_queued": 0, "tasks_run": 0,
@@ -2263,10 +2280,7 @@ async def autonomous_worker_tick(request: Request):
             )
             if campaign:
                 campaign.pop("_id", None)
-                if campaign.get("pending_enrichment_ids"):
-                    batch = await _run_lead_campaign_enrichment(campaign, user)
-                else:
-                    batch = await _run_lead_campaign_batch(campaign, user)
+                batch = await _run_lead_campaign_batch(campaign, user)
                 report["lead_campaign_batches"] += 1
                 report["new_leads"] += int(batch.get("new_leads", 0))
         except Exception as exc:
@@ -2285,6 +2299,39 @@ async def autonomous_worker_tick(request: Request):
             report["errors"].append(f"task:{user_id}:{type(exc).__name__}")
     report["ran_at"] = datetime.now(timezone.utc).isoformat()
     return report
+
+
+@api.post("/worker/enrichment-tick")
+async def autonomous_enrichment_tick(request: Request):
+    supplied = request.headers.get("authorization", "").removeprefix("Bearer ").strip()
+    if not CRON_SECRET or not hmac.compare_digest(supplied, CRON_SECRET):
+        raise HTTPException(401, "Invalid worker authorization")
+    now = datetime.now(timezone.utc)
+    campaign = await db.lead_campaigns.find_one_and_update(
+        {"pending_enrichment_ids.0": {"$exists": True}, "$or": [
+            {"enrichment_lock_until": {"$exists": False}}, {"enrichment_lock_until": {"$lte": now}},
+        ]},
+        {"$set": {"enrichment_lock_until": now + timedelta(minutes=10)}},
+        sort=[("updated_at", 1)], return_document=True,
+    )
+    if not campaign:
+        return {"processed": False, "reason": "no_pending_enrichment", "ran_at": now.isoformat()}
+    campaign.pop("_id", None)
+    user = await db.users.find_one({"id": campaign["user_id"]}, {"_id": 0})
+    if not user:
+        await db.lead_campaigns.update_one({"id": campaign["id"]}, {"$unset": {"enrichment_lock_until": ""}})
+        return {"processed": False, "reason": "campaign_user_missing", "ran_at": now.isoformat()}
+    try:
+        result = await _run_lead_campaign_enrichment(campaign, user)
+        await db.lead_campaigns.update_one({"id": campaign["id"]}, {"$unset": {"enrichment_lock_until": ""}})
+        return {"processed": True, **result, "ran_at": datetime.now(timezone.utc).isoformat()}
+    except Exception as exc:
+        await db.lead_campaigns.update_one({"id": campaign["id"]}, {
+            "$unset": {"enrichment_lock_until": ""},
+            "$set": {"last_enrichment_error": type(exc).__name__, "updated_at": datetime.now(timezone.utc)},
+        })
+        logger.error("Lead enrichment worker failed: %s", exc)
+        return {"processed": False, "error": type(exc).__name__, "ran_at": datetime.now(timezone.utc).isoformat()}
 
 
 # ============================================================

@@ -18,3 +18,11 @@ jobs:
             -X POST \
             -H "Authorization: Bearer ${WORKER_SECRET}" \
             https://backend-zeta-seven-97.vercel.app/api/worker/tick
+      - name: Verify one queued lead and prepare approval
+        env:
+          WORKER_SECRET: ${{ secrets.WORKER_SECRET }}
+        run: |
+          curl --fail --silent --show-error --retry 2 \
+            -X POST \
+            -H "Authorization: Bearer ${WORKER_SECRET}" \
+            https://backend-zeta-seven-97.vercel.app/api/worker/enrichment-tick
