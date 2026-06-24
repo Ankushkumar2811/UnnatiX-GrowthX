@@ -8,7 +8,7 @@ import { theme } from '@/src/theme';
 
 type Lead = { id: string; company_name: string; industry?: string; location?: string; phone?: string; website?: string; email?: string; email_verification_status?: string; pipeline_stage?: string; google_maps_url?: string; email_source?: string; do_not_contact?: boolean; discovered_by?: string; discovery_query?: string; discovery_goal_id?: string };
 type AgentRun = { task_id: string; title: string; objective?: string; status: string; execution_status?: string; progress: number; discovered: number; verified: number };
-type LeadCampaign = { id: string; objective: string; target: number; unique_leads: number; verified_leads: number; approvals_queued: number; searches_completed: number; cursor: number; status: string; last_query?: string; last_location?: string };
+type LeadCampaign = { id: string; objective: string; target: number; unique_leads: number; verified_leads: number; approvals_queued: number; searches_completed: number; cursor: number; status: string; pending_enrichment?: number; last_query?: string; last_location?: string };
 type AgentLive = { runs: AgentRun[]; campaigns: LeadCampaign[]; leads: Lead[] };
 
 export default function LeadsPage() {
@@ -72,7 +72,7 @@ export default function LeadsPage() {
         <View style={s.row}><Text style={s.runTitle}>Persistent Lead Campaign</Text><Text style={s.liveBadge}>{campaign.status === 'active' ? '● RUNNING' : campaign.status.replaceAll('_', ' ').toUpperCase()}</Text></View>
         <Text style={s.runObjective} numberOfLines={3}>{campaign.objective}</Text>
         <View style={s.runStats}><Text style={s.stat}>{campaignProgress}%</Text><Text style={s.stat}>{campaign.unique_leads}/{campaign.target} UNIQUE</Text><Text style={s.stat}>{campaign.verified_leads} VERIFIED</Text></View>
-        <Text style={s.runObjective}>Searches: {campaign.searches_completed} · Approvals: {campaign.approvals_queued}</Text>
+        <Text style={s.runObjective}>Searches: {campaign.searches_completed} · Email checks queued: {campaign.pending_enrichment || 0} · Approvals: {campaign.approvals_queued}</Text>
         {!!campaign.last_query && <Text style={s.runObjective}>Last batch: {campaign.last_query} · {campaign.last_location}</Text>}
         <Text style={s.refresh}>Next unused batch runs automatically. Screen refreshes every 5 seconds.</Text>
       </View>}

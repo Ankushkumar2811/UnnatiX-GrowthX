@@ -1022,11 +1022,11 @@ def _lead_campaign_spec(objective: str) -> dict:
     queries = [query for query, aliases in LEAD_INDUSTRY_ALIASES if any(alias.casefold() in text for alias in aliases)]
     if not queries:
         queries = ["dental clinics", "real estate agencies", "coaching institutes"]
-    target_match = re.search(
+    target_matches = re.findall(
         r"(\d[\d,]*)\s*(?:real\s+)?(?:business(?:es)?|client(?:s)?|lead(?:s)?|prospect(?:s)?|लीड|क्लाइंट|व्यवसाय)",
         text,
     )
-    target = int(target_match.group(1).replace(",", "")) if target_match else 50
+    target = max(int(value.replace(",", "")) for value in target_matches) if target_matches else 50
     target = max(1, min(target, 5000))
     delhi_ncr = any(term in text for term in ("delhi", "ncr", "दिल्ली", "नोएडा", "गुरुग्राम", "गुड़गांव"))
     locations = DELHI_NCR_LEAD_LOCATIONS if delhi_ncr else ["Delhi NCR"]
@@ -1045,6 +1045,14 @@ async def _ensure_lead_campaign(task: dict, user: dict, objective: str) -> dict:
         {"user_id": user["id"], "task_id": task["id"]}, {"_id": 0},
     )
     if existing:
+        spec = _lead_campaign_spec(objective)
+        if spec["target"] > int(existing.get("target", 0)):
+            await db.lead_campaigns.update_one(
+                {"id": existing["id"]},
+                {"$set": {"target": spec["target"], "status": "active", "updated_at": datetime.now(timezone.utc)}},
+            )
+            existing["target"] = spec["target"]
+            existing["status"] = "active"
         return existing
     spec = _lead_campaign_spec(objective)
     now = datetime.now(timezone.utc)
@@ -1054,6 +1062,7 @@ async def _ensure_lead_campaign(task: dict, user: dict, objective: str) -> dict:
         "queries": spec["queries"], "locations": spec["locations"], "matrix": spec["matrix"],
         "cursor": 0, "searches_completed": 0, "unique_leads": 0, "verified_leads": 0,
         "approvals_queued": 0, "seen_place_ids": [], "status": "active",
+        "pending_enrichment_ids": [],
         "brief_language": spec["brief_language"], "lock_until": now + timedelta(minutes=10),
         "created_at": now, "updated_at": now,
     }
@@ -1097,23 +1106,6 @@ async def _run_lead_campaign_batch(campaign: dict, user: dict) -> dict:
             "discovery_run_at": now,
         }, "$addToSet": {"campaign_ids": campaign["id"]}})
 
-    verified_count = 0
-    approvals_count = 0
-    for lead in new_leads[:2]:
-        if not lead.get("website"):
-            continue
-        enriched = await enrich_live_leads(LeadEnrichIn(lead_id=lead["id"], limit=1, verify_email=True), user)
-        updated = (enriched.get("leads") or [None])[0]
-        if not updated or updated.get("email_verification_status") != "verified":
-            continue
-        verified_count += 1
-        try:
-            await _queue_deterministic_outreach(user, updated)
-            approvals_count += 1
-        except HTTPException as exc:
-            if exc.status_code != 409:
-                raise
-
     next_cursor = cursor + 1
     next_unique = unique_total + len(new_leads)
     final_status = "completed" if next_unique >= target else (
@@ -1123,12 +1115,40 @@ async def _run_lead_campaign_batch(campaign: dict, user: dict) -> dict:
               "unique_leads": next_unique, "status": final_status, "last_query": search["query"],
               "last_location": search["location"], "last_batch_new": len(new_leads), "updated_at": now}
     await db.lead_campaigns.update_one({"id": campaign["id"]}, {
-        "$set": update, "$inc": {"verified_leads": verified_count, "approvals_queued": approvals_count},
-        "$addToSet": {"seen_place_ids": {"$each": new_place_ids}}, "$unset": {"lock_until": ""},
+        "$set": update,
+        "$addToSet": {"seen_place_ids": {"$each": new_place_ids},
+                      "pending_enrichment_ids": {"$each": [lead["id"] for lead in new_leads if lead.get("website")]}},
+        "$unset": {"lock_until": ""},
     })
     return {"campaign_id": campaign["id"], "status": final_status, "new_leads": len(new_leads),
-            "unique_leads": next_unique, "target": target, "verified": verified_count,
-            "approvals_queued": approvals_count, "query": search["query"], "location": search["location"]}
+            "unique_leads": next_unique, "target": target, "verified": 0,
+            "approvals_queued": 0, "query": search["query"], "location": search["location"]}
+
+
+async def _run_lead_campaign_enrichment(campaign: dict, user: dict) -> dict:
+    pending = campaign.get("pending_enrichment_ids") or []
+    if not pending:
+        return {"campaign_id": campaign["id"], "enriched": 0, "verified": 0, "approvals_queued": 0}
+    lead_id = pending[0]
+    enriched = await enrich_live_leads(LeadEnrichIn(lead_id=lead_id, limit=1, verify_email=True), user)
+    updated = (enriched.get("leads") or [None])[0]
+    verified = 1 if updated and updated.get("email_verification_status") == "verified" else 0
+    approvals = 0
+    if verified:
+        try:
+            await _queue_deterministic_outreach(user, updated)
+            approvals = 1
+        except HTTPException as exc:
+            if exc.status_code != 409:
+                raise
+    await db.lead_campaigns.update_one({"id": campaign["id"]}, {
+        "$pull": {"pending_enrichment_ids": lead_id},
+        "$inc": {"verified_leads": verified, "approvals_queued": approvals},
+        "$set": {"last_enriched_lead_id": lead_id, "updated_at": datetime.now(timezone.utc)},
+        "$unset": {"lock_until": ""},
+    })
+    return {"campaign_id": campaign["id"], "enriched": 1, "verified": verified,
+            "approvals_queued": approvals}
 
 
 async def execute_agent_task(task: dict, user: dict, knowledge: List[dict]) -> dict:
@@ -1775,6 +1795,9 @@ async def live_sales_agent_discovery(user: dict = Depends(current_user)):
     campaigns = await db.lead_campaigns.find(
         {"user_id": user["id"]}, {"_id": 0, "matrix": 0, "seen_place_ids": 0},
     ).sort("updated_at", -1).limit(20).to_list(20)
+    for campaign in campaigns:
+        campaign["pending_enrichment"] = len(campaign.get("pending_enrichment_ids") or [])
+        campaign.pop("pending_enrichment_ids", None)
     return {"runs": runs, "campaigns": campaigns, "leads": leads,
             "updated_at": datetime.now(timezone.utc)}
 
@@ -2198,7 +2221,10 @@ async def autonomous_worker_tick(request: Request):
         user_ids.add(rec["user_id"])
     async for task in db.tasks.find({"status": "planning"}, {"user_id": 1}).limit(20):
         user_ids.add(task["user_id"])
-    async for campaign in db.lead_campaigns.find({"status": "active"}, {"user_id": 1}).limit(20):
+    campaign_work_query = {"$or": [
+        {"status": "active"}, {"pending_enrichment_ids.0": {"$exists": True}},
+    ]}
+    async for campaign in db.lead_campaigns.find(campaign_work_query, {"user_id": 1}).limit(20):
         user_ids.add(campaign["user_id"])
     report = {"users": 0, "gmail_synced": 0, "followups_queued": 0, "tasks_run": 0,
               "lead_campaign_batches": 0, "new_leads": 0, "errors": []}
@@ -2223,15 +2249,18 @@ async def autonomous_worker_tick(request: Request):
         try:
             now = datetime.now(timezone.utc)
             campaign = await db.lead_campaigns.find_one_and_update(
-                {"user_id": user_id, "status": "active", "$or": [
+                {"user_id": user_id, "$and": [campaign_work_query, {"$or": [
                     {"lock_until": {"$exists": False}}, {"lock_until": {"$lte": now}},
-                ]},
+                ]}]},
                 {"$set": {"lock_until": now + timedelta(minutes=10), "last_attempt_at": now}},
                 sort=[("updated_at", 1)], return_document=True,
             )
             if campaign:
                 campaign.pop("_id", None)
-                batch = await _run_lead_campaign_batch(campaign, user)
+                if campaign.get("pending_enrichment_ids"):
+                    batch = await _run_lead_campaign_enrichment(campaign, user)
+                else:
+                    batch = await _run_lead_campaign_batch(campaign, user)
                 report["lead_campaign_batches"] += 1
                 report["new_leads"] += int(batch.get("new_leads", 0))
         except Exception as exc:
