@@ -27,7 +27,7 @@ export default function LeadsPage() {
   }, []);
   useFocusEffect(useCallback(() => {
     load();
-    const timer = setInterval(load, 5000);
+    const timer = setInterval(load, 15000);
     return () => clearInterval(timer);
   }, [load]));
 
@@ -74,13 +74,13 @@ export default function LeadsPage() {
         <View style={s.runStats}><Text style={s.stat}>{campaignProgress}%</Text><Text style={s.stat}>{campaign.unique_leads}/{campaign.target} UNIQUE</Text><Text style={s.stat}>{campaign.verified_leads} VERIFIED</Text></View>
         <Text style={s.runObjective}>Searches: {campaign.searches_completed} · Email checks queued: {campaign.pending_enrichment || 0} · Approvals: {campaign.approvals_queued}</Text>
         {!!campaign.last_query && <Text style={s.runObjective}>Last batch: {campaign.last_query} · {campaign.last_location}</Text>}
-        <Text style={s.refresh}>Next unused batch runs automatically. Screen refreshes every 5 seconds.</Text>
+        <Text style={s.refresh}>Next unused batch runs automatically. Screen refreshes every 15 seconds.</Text>
       </View>}
       {!campaign && latestRun ? <View style={s.runCard}>
         <View style={s.row}><Text style={s.runTitle}>{latestRun.title}</Text><Text style={s.liveBadge}>{latestRun.status === 'running' ? '● LIVE' : latestRun.execution_status?.replaceAll('_', ' ').toUpperCase()}</Text></View>
         <Text style={s.runObjective} numberOfLines={3}>{latestRun.objective}</Text>
         <View style={s.runStats}><Text style={s.stat}>{latestRun.progress}% PROGRESS</Text><Text style={s.stat}>{latestRun.discovered} FOUND</Text><Text style={s.stat}>{latestRun.verified} VERIFIED</Text></View>
-        <Text style={s.refresh}>Auto-refreshes every 5 seconds</Text>
+        <Text style={s.refresh}>Auto-refreshes every 15 seconds</Text>
       </View> : !campaign && <View style={s.runCard}><Text style={s.runObjective}>No CEO-linked sales discovery run yet.</Text></View>}
       <Text style={s.section}>{agentLive.leads.length} AGENT FOUND · {leads.length} TOTAL SAVED</Text>
       {displayedLeads.map(lead => <View key={lead.id} style={[s.card, agentLeadIds.has(lead.id) && s.agentCard]}>

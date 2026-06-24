@@ -1769,26 +1769,11 @@ async def live_sales_agent_discovery(user: dict = Depends(current_user)):
         ]},
         {"_id": 0},
     ).sort("updated_at", -1).limit(10).to_list(10)
-    runs = []
-    for task in tasks:
-        goal = await db.goals.find_one(
-            {"id": task.get("goal_id"), "user_id": user["id"]},
-            {"_id": 0, "objective": 1},
-        )
-        discovered = await db.leads.count_documents({
-            "user_id": user["id"], "discovery_task_id": task["id"],
-        })
-        verified = await db.leads.count_documents({
-            "user_id": user["id"], "discovery_task_id": task["id"],
-            "email_verification_status": "verified",
-        })
-        runs.append({
-            "task_id": task["id"], "goal_id": task.get("goal_id"),
-            "title": task.get("title"), "objective": (goal or {}).get("objective"),
-            "status": task.get("status"), "execution_status": task.get("execution_status"),
-            "progress": task.get("progress", 0), "discovered": discovered,
-            "verified": verified, "updated_at": task.get("updated_at"),
-        })
+    goal_ids = list({task.get("goal_id") for task in tasks if task.get("goal_id")})
+    goals = await db.goals.find(
+        {"user_id": user["id"], "id": {"$in": goal_ids}}, {"_id": 0, "id": 1, "objective": 1},
+    ).to_list(20)
+    goal_map = {goal["id"]: goal.get("objective") for goal in goals}
     leads = await db.leads.find(
         {"user_id": user["id"], "discovered_by": "sales_agent"}, {"_id": 0},
     ).sort("discovery_run_at", -1).limit(500).to_list(500)
@@ -1798,6 +1783,27 @@ async def live_sales_agent_discovery(user: dict = Depends(current_user)):
     for campaign in campaigns:
         campaign["pending_enrichment"] = len(campaign.get("pending_enrichment_ids") or [])
         campaign.pop("pending_enrichment_ids", None)
+    campaign_by_task = {campaign.get("task_id"): campaign for campaign in campaigns}
+    lead_counts = {}
+    verified_counts = {}
+    for lead in leads:
+        task_id = lead.get("discovery_task_id")
+        if not task_id:
+            continue
+        lead_counts[task_id] = lead_counts.get(task_id, 0) + 1
+        if lead.get("email_verification_status") == "verified":
+            verified_counts[task_id] = verified_counts.get(task_id, 0) + 1
+    runs = []
+    for task in tasks:
+        campaign = campaign_by_task.get(task["id"], {})
+        runs.append({
+            "task_id": task["id"], "goal_id": task.get("goal_id"), "title": task.get("title"),
+            "objective": goal_map.get(task.get("goal_id")), "status": task.get("status"),
+            "execution_status": task.get("execution_status"), "progress": task.get("progress", 0),
+            "discovered": campaign.get("unique_leads", lead_counts.get(task["id"], 0)),
+            "verified": campaign.get("verified_leads", verified_counts.get(task["id"], 0)),
+            "updated_at": task.get("updated_at"),
+        })
     return {"runs": runs, "campaigns": campaigns, "leads": leads,
             "updated_at": datetime.now(timezone.utc)}
 
