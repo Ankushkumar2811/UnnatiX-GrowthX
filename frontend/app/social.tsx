@@ -214,7 +214,7 @@ export default function SocialManager() {
               <Text style={s.accountName}>{a.label}</Text>
               <Text style={s.accountHandle}>{a.configured ? `${a.profile_name} · ${a.profile_handle}` : 'Not connected'}</Text>
               <Text style={[s.pill, a.configured && { color: theme.color.success, borderColor: theme.color.success + '55' }]}>
-                {a.configured ? 'MANUAL PROFILE ADDED' : a.oauth_ready ? 'OAUTH READY' : 'CONNECT PROFILE'}
+                {a.status === 'connected_live' ? 'CONNECTED · LIVE' : a.configured ? 'MANUAL PROFILE ADDED' : a.oauth_ready ? 'OAUTH READY' : 'CONNECT PROFILE'}
               </Text>
             </View>
           ))}

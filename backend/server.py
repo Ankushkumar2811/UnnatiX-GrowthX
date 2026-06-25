@@ -2202,18 +2202,34 @@ async def _approve_social_post(user_id: str, post: dict) -> None:
 async def list_social_accounts(user: dict = Depends(current_user)):
     existing = await db.social_accounts.find({"user_id": user["id"]}, {"_id": 0}).sort("created_at", -1).to_list(50)
     by_platform = {a["platform"]: a for a in existing}
+    google_rec = await db.integrations.find_one({"user_id": user["id"], "id": "google_workspace"}, {"_id": 0}) or {}
+    google_scopes = set(google_rec.get("scopes", []))
+    youtube_live = (
+        google_rec.get("status") == "connected_live"
+        and "https://www.googleapis.com/auth/youtube.upload" in google_scopes
+    )
     out = []
     for platform, label in SOCIAL_PLATFORM_LABELS.items():
         rec = by_platform.get(platform)
+        effective_status = rec.get("status", "not_connected") if rec else "not_connected"
+        profile_name = rec.get("profile_name") if rec else ""
+        profile_handle = rec.get("profile_handle") if rec else ""
+        profile_url = rec.get("profile_url") if rec else ""
+        configured = bool(rec)
+        if platform == "youtube" and youtube_live:
+            effective_status = "connected_live"
+            configured = True
+            profile_name = profile_name or "UnnatiX Technologies"
+            profile_handle = profile_handle or "@unnatixtechnologies"
         out.append({
             "platform": platform,
             "label": label,
-            "configured": bool(rec),
-            "status": rec.get("status", "not_connected") if rec else "not_connected",
-            "profile_name": rec.get("profile_name") if rec else "",
-            "profile_handle": rec.get("profile_handle") if rec else "",
-            "profile_url": rec.get("profile_url") if rec else "",
-            "oauth_ready": _social_accounts_env_live(platform),
+            "configured": configured,
+            "status": effective_status,
+            "profile_name": profile_name,
+            "profile_handle": profile_handle,
+            "profile_url": profile_url,
+            "oauth_ready": youtube_live if platform == "youtube" else _social_accounts_env_live(platform),
             "updated_at": rec.get("updated_at") if rec else None,
         })
     return out
