@@ -269,12 +269,38 @@ export default function SocialManager() {
             </Pressable>
           </View>
           {!!mediaError && <Text style={s.errorText}>{mediaError}</Text>}
+          <View style={s.destinationHead}>
+            <View>
+              <Text style={s.destinationTitle}>Where should this upload go?</Text>
+              <Text style={s.destinationSub}>{selected.length} platform{selected.length === 1 ? '' : 's'} selected</Text>
+            </View>
+            <Pressable onPress={() => setSelected(accounts.map(a => a.platform))} style={s.selectAllBtn}>
+              <Text style={s.selectAllText}>Select all</Text>
+            </Pressable>
+          </View>
+          <View style={s.destinationGrid}>
+            {accounts.map(a => {
+              const active = selected.includes(a.platform);
+              return (
+                <Pressable key={a.platform} onPress={() => togglePlatform(a.platform)} style={[s.destinationCard, active && s.destinationActive]}>
+                  <View style={s.destinationTop}>
+                    <Ionicons name={PLATFORM_ICONS[a.platform]} size={18} color={active ? '#fff' : theme.color.onSurfaceSecondary} />
+                    <Ionicons name={active ? 'checkmark-circle' : 'ellipse-outline'} size={18} color={active ? '#fff' : theme.color.onSurfaceTertiary} />
+                  </View>
+                  <Text style={[s.destinationName, active && { color: '#fff' }]}>{a.label}</Text>
+                  <Text style={[s.destinationStatus, active && { color: '#FFE6DC' }]}>
+                    {a.status === 'connected_live' ? 'Live publish' : a.configured ? 'Draft/manual' : a.oauth_ready ? 'OAuth ready' : 'Not connected'}
+                  </Text>
+                </Pressable>
+              );
+            })}
+          </View>
           <View style={s.notice}>
             <Ionicons name="shield-checkmark" size={16} color={theme.color.warning} />
             <Text style={s.noticeText}>Generated posts go to Founder Approvals first. YouTube can publish after approval; Meta/LinkedIn/X still need live publisher tokens.</Text>
           </View>
           <Pressable disabled={busy || selected.length === 0} onPress={generate} style={[s.primaryBtn, selected.length === 0 && { opacity: 0.5 }]}>
-            {busy ? <ActivityIndicator size="small" color="#fff" /> : <Text style={s.primaryText}>Generate + send to approval</Text>}
+            {busy ? <ActivityIndicator size="small" color="#fff" /> : <Text style={s.primaryText}>Generate for {selected.length} platform{selected.length === 1 ? '' : 's'} + send to approval</Text>}
           </Pressable>
         </View>
 
@@ -367,6 +393,17 @@ const s = StyleSheet.create({
   secondaryBtn: { flexDirection: 'row', alignItems: 'center', gap: 6, borderWidth: 1, borderColor: theme.color.brand + '66', borderRadius: theme.radius.md, paddingHorizontal: 12, paddingVertical: 10 },
   secondaryText: { color: theme.color.brand, fontSize: 12, fontWeight: '800' },
   errorText: { color: theme.color.error, fontSize: 12, lineHeight: 17 },
+  destinationHead: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 10, marginTop: 2 },
+  destinationTitle: { color: theme.color.onSurface, fontSize: 14, fontWeight: '900' },
+  destinationSub: { color: theme.color.onSurfaceTertiary, fontSize: 11, marginTop: 2 },
+  selectAllBtn: { borderWidth: 1, borderColor: theme.color.brand + '66', borderRadius: theme.radius.pill, paddingHorizontal: 12, paddingVertical: 7 },
+  selectAllText: { color: theme.color.brand, fontSize: 11, fontWeight: '900' },
+  destinationGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  destinationCard: { width: '48%', backgroundColor: theme.color.surface, borderWidth: 1, borderColor: theme.color.border, borderRadius: theme.radius.md, padding: theme.spacing.md },
+  destinationActive: { backgroundColor: theme.color.brand, borderColor: theme.color.brand },
+  destinationTop: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  destinationName: { color: theme.color.onSurface, fontSize: 13, fontWeight: '900', marginTop: 10 },
+  destinationStatus: { color: theme.color.onSurfaceTertiary, fontSize: 10, marginTop: 3, fontWeight: '700' },
   primaryBtn: { backgroundColor: theme.color.brand, borderRadius: theme.radius.md, paddingVertical: 13, alignItems: 'center', justifyContent: 'center' },
   primaryText: { color: '#fff', fontWeight: '900', letterSpacing: 0.3 },
   empty: { backgroundColor: theme.color.surfaceSecondary, borderWidth: 1, borderColor: theme.color.border, borderRadius: theme.radius.md, padding: theme.spacing.xl },
