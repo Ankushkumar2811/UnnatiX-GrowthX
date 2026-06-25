@@ -69,6 +69,7 @@ export default function SocialManager() {
   const [mediaMime, setMediaMime] = useState('');
   const [mediaSize, setMediaSize] = useState(0);
   const [mediaError, setMediaError] = useState('');
+  const [youtubePrivacy, setYoutubePrivacy] = useState<'public' | 'unlisted' | 'private'>('public');
 
   const load = useCallback(async () => {
     try {
@@ -157,6 +158,7 @@ export default function SocialManager() {
           media_b64: mediaB64 || undefined,
           media_mime: mediaMime || undefined,
           media_name: mediaName || undefined,
+          youtube_privacy_status: youtubePrivacy,
           ...uploaded,
         },
       });
@@ -168,6 +170,18 @@ export default function SocialManager() {
       await load();
     } catch (e: any) {
       setMediaError(e?.message || 'Could not upload/generate social post.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const makeYouTubePublic = async (postId: string) => {
+    setBusy(true);
+    try {
+      await api('/social/youtube/privacy', { method: 'POST', body: { post_id: postId, privacy_status: 'public' } });
+      await load();
+    } catch (e: any) {
+      setMediaError(e?.message || 'Could not update YouTube privacy.');
     } finally {
       setBusy(false);
     }
@@ -295,6 +309,19 @@ export default function SocialManager() {
               );
             })}
           </View>
+          {selected.includes('youtube') && (
+            <View style={s.privacyBox}>
+              <Text style={s.destinationTitle}>YouTube visibility</Text>
+              <View style={s.privacyRow}>
+                {(['public', 'unlisted', 'private'] as const).map(v => (
+                  <Pressable key={v} onPress={() => setYoutubePrivacy(v)} style={[s.privacyBtn, youtubePrivacy === v && s.privacyActive]}>
+                    <Text style={[s.privacyText, youtubePrivacy === v && { color: '#fff' }]}>{v.toUpperCase()}</Text>
+                  </Pressable>
+                ))}
+              </View>
+              <Text style={s.destinationSub}>Default is Public, so approved YouTube videos go live publicly.</Text>
+            </View>
+          )}
           <View style={s.notice}>
             <Ionicons name="shield-checkmark" size={16} color={theme.color.warning} />
             <Text style={s.noticeText}>Generated posts go to Founder Approvals first. YouTube can publish after approval; Meta/LinkedIn/X still need live publisher tokens.</Text>
@@ -328,7 +355,16 @@ export default function SocialManager() {
             </View>
             {!!post.asset_brief && <Text style={s.assetBrief}>Creative: {post.asset_brief}</Text>}
             {post.media_attached && <Text style={s.mediaTag}>MEDIA ATTACHED · {post.media_name || post.media_mime || 'creative/video'}</Text>}
-            {!!post.platform_results?.youtube?.url && <Text style={s.youtubeUrl}>YouTube: {post.platform_results.youtube.url}</Text>}
+            {!!post.platform_results?.youtube?.url && (
+              <View style={s.youtubePublishedBox}>
+                <Text style={s.youtubeUrl}>YouTube: {post.platform_results.youtube.url}</Text>
+                {post.platform_results.youtube.status !== 'published_public' && (
+                  <Pressable onPress={() => makeYouTubePublic(post.id)} style={s.selectAllBtn}>
+                    <Text style={s.selectAllText}>Make public</Text>
+                  </Pressable>
+                )}
+              </View>
+            )}
             {post.platforms.slice(0, 5).map(p => {
               const item = post.per_platform?.[p];
               if (!item?.caption && !item?.title && !item?.description) return null;
@@ -404,6 +440,11 @@ const s = StyleSheet.create({
   destinationTop: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
   destinationName: { color: theme.color.onSurface, fontSize: 13, fontWeight: '900', marginTop: 10 },
   destinationStatus: { color: theme.color.onSurfaceTertiary, fontSize: 10, marginTop: 3, fontWeight: '700' },
+  privacyBox: { backgroundColor: theme.color.surface, borderWidth: 1, borderColor: theme.color.border, borderRadius: theme.radius.md, padding: theme.spacing.md, gap: 8 },
+  privacyRow: { flexDirection: 'row', gap: 8 },
+  privacyBtn: { flex: 1, alignItems: 'center', borderWidth: 1, borderColor: theme.color.border, borderRadius: theme.radius.pill, paddingVertical: 9, backgroundColor: theme.color.surfaceTertiary },
+  privacyActive: { backgroundColor: theme.color.brand, borderColor: theme.color.brand },
+  privacyText: { color: theme.color.onSurfaceSecondary, fontSize: 11, fontWeight: '900', letterSpacing: 0.4 },
   primaryBtn: { backgroundColor: theme.color.brand, borderRadius: theme.radius.md, paddingVertical: 13, alignItems: 'center', justifyContent: 'center' },
   primaryText: { color: '#fff', fontWeight: '900', letterSpacing: 0.3 },
   empty: { backgroundColor: theme.color.surfaceSecondary, borderWidth: 1, borderColor: theme.color.border, borderRadius: theme.radius.md, padding: theme.spacing.xl },
@@ -418,6 +459,7 @@ const s = StyleSheet.create({
   platformText: { color: theme.color.brand, fontSize: 10, fontWeight: '800', textTransform: 'uppercase' },
   assetBrief: { color: theme.color.onSurfaceSecondary, fontSize: 12, lineHeight: 17, marginTop: theme.spacing.md },
   mediaTag: { alignSelf: 'flex-start', color: theme.color.success, borderWidth: 1, borderColor: theme.color.success + '55', borderRadius: theme.radius.pill, paddingHorizontal: 8, paddingVertical: 4, fontSize: 9, fontWeight: '900', marginTop: theme.spacing.md, letterSpacing: 0.4 },
+  youtubePublishedBox: { marginTop: theme.spacing.md, gap: 8, alignItems: 'flex-start' },
   youtubeUrl: { color: theme.color.info, fontSize: 12, lineHeight: 17, marginTop: theme.spacing.md },
   captionBox: { marginTop: theme.spacing.md, backgroundColor: theme.color.surface, borderWidth: 1, borderColor: theme.color.border, borderRadius: theme.radius.md, padding: theme.spacing.md },
   captionLabel: { color: theme.color.brandSecondary, fontSize: 10, fontWeight: '900', letterSpacing: 0.6, textTransform: 'uppercase' },

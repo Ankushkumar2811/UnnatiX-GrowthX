@@ -343,6 +343,7 @@ class SocialDraftIn(BaseModel):
     media_url: Optional[str] = Field(default=None, max_length=600)
     media_public_id: Optional[str] = Field(default=None, max_length=260)
     media_resource_type: Optional[str] = Field(default=None, max_length=30)
+    youtube_privacy_status: Literal["private", "unlisted", "public"] = "public"
     thumbnail_b64: Optional[str] = Field(default=None, max_length=2_000_000)
     thumbnail_mime: Optional[str] = Field(default="image/jpeg", max_length=80)
 
@@ -353,6 +354,12 @@ class SocialMediaSignIn(BaseModel):
 
 class SocialPublishIn(BaseModel):
     post_id: str
+
+
+class YouTubePrivacyIn(BaseModel):
+    post_id: Optional[str] = None
+    video_id: Optional[str] = None
+    privacy_status: Literal["private", "unlisted", "public"] = "public"
 
 
 class GoogleDateRangeIn(BaseModel):
@@ -1955,6 +1962,20 @@ async def _upload_youtube_video_for_user(user_id: str, payload: dict) -> dict:
     return result
 
 
+async def _update_youtube_privacy(user_id: str, video_id: str, privacy_status: str) -> dict:
+    token = await _google_access_token(user_id, "https://www.googleapis.com/auth/youtube.upload")
+    async with httpx.AsyncClient(timeout=30, headers={"Authorization": f"Bearer {token}"}) as http:
+        response = await http.put(
+            "https://www.googleapis.com/youtube/v3/videos",
+            params={"part": "status"},
+            json={"id": video_id, "status": {"privacyStatus": privacy_status}},
+        )
+    if response.status_code >= 400:
+        logger.warning("YouTube privacy update failed status=%s", response.status_code)
+        raise HTTPException(response.status_code if response.status_code < 500 else 502, "YouTube privacy update failed")
+    return response.json()
+
+
 @api.post("/google/youtube/upload")
 async def google_youtube_upload(body: YouTubeUploadIn, user: dict = Depends(current_user)):
     result = await _upload_youtube_video_for_user(user["id"], {
@@ -2157,14 +2178,14 @@ async def _approve_social_post(user_id: str, post: dict) -> None:
             "media_url": post.get("media_url"),
             "mime": post.get("media_mime") or "video/mp4",
             "media_name": post.get("media_name") or "video.mp4",
-            "privacy_status": "private",
+            "privacy_status": post.get("youtube_privacy_status") or "public",
             "tags": tags,
             "thumbnail_b64": post.get("thumbnail_b64"),
             "thumbnail_mime": post.get("thumbnail_mime") or "image/jpeg",
         })
         youtube_uploaded = True
         platform_results["youtube"] = {
-            "status": "published_private",
+            "status": f"published_{post.get('youtube_privacy_status') or 'public'}",
             "video_id": result.get("id"),
             "url": f"https://www.youtube.com/watch?v={result.get('id')}" if result.get("id") else "",
             "raw": result,
@@ -2324,6 +2345,7 @@ async def create_social_draft(body: SocialDraftIn, user: dict = Depends(current_
         "media_url": body.media_url,
         "media_public_id": body.media_public_id,
         "media_resource_type": body.media_resource_type,
+        "youtube_privacy_status": body.youtube_privacy_status,
         "thumbnail_b64": body.thumbnail_b64,
         "thumbnail_mime": body.thumbnail_mime,
         "media_attached": bool(body.media_b64 or body.media_url),
@@ -2364,6 +2386,28 @@ async def publish_social_post(body: SocialPublishIn, user: dict = Depends(curren
     await _approve_social_post(user["id"], post)
     updated = await db.social_posts.find_one({"id": body.post_id, "user_id": user["id"]}, {"_id": 0})
     return updated
+
+
+@api.post("/social/youtube/privacy")
+async def update_social_youtube_privacy(body: YouTubePrivacyIn, user: dict = Depends(current_user)):
+    video_id = body.video_id
+    post = None
+    if body.post_id:
+        post = await db.social_posts.find_one({"id": body.post_id, "user_id": user["id"]}, {"_id": 0})
+        if not post:
+            raise HTTPException(404, "Social post not found")
+        video_id = (((post.get("platform_results") or {}).get("youtube") or {}).get("video_id")) or video_id
+    if not video_id:
+        raise HTTPException(400, "YouTube video_id is required")
+    result = await _update_youtube_privacy(user["id"], video_id, body.privacy_status)
+    if post:
+        await db.social_posts.update_one({"id": post["id"], "user_id": user["id"]}, {"$set": {
+            "platform_results.youtube.status": f"published_{body.privacy_status}",
+            "platform_results.youtube.privacy_status": body.privacy_status,
+            "updated_at": datetime.now(timezone.utc),
+        }})
+    await log_activity(user["id"], "marketing", f"YouTube video privacy changed to {body.privacy_status}", "social")
+    return {"ok": True, "video_id": video_id, "privacy_status": body.privacy_status, "youtube": result}
 
 
 # ============================================================
