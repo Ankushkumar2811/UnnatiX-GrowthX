@@ -70,6 +70,10 @@ GA4_PROPERTY_ID = os.environ.get("GA4_PROPERTY_ID", "")
 SEARCH_CONSOLE_SITE_URL = os.environ.get("SEARCH_CONSOLE_SITE_URL", "")
 YOUTUBE_CLIENT_ID = os.environ.get("YOUTUBE_CLIENT_ID", "")
 YOUTUBE_CLIENT_SECRET = os.environ.get("YOUTUBE_CLIENT_SECRET", "")
+CLOUDINARY_CLOUD_NAME = os.environ.get("CLOUDINARY_CLOUD_NAME", "")
+CLOUDINARY_API_KEY = os.environ.get("CLOUDINARY_API_KEY", "")
+CLOUDINARY_API_SECRET = os.environ.get("CLOUDINARY_API_SECRET", "")
+CLOUDINARY_UPLOAD_FOLDER = os.environ.get("CLOUDINARY_UPLOAD_FOLDER", "unnatix/social")
 DAILY_EMAIL_LIMIT = int(os.environ.get("DAILY_EMAIL_LIMIT", "25"))
 CRON_SECRET = os.environ.get("CRON_SECRET", "")
 LLM_PROVIDER_ORDER = [
@@ -336,8 +340,15 @@ class SocialDraftIn(BaseModel):
     media_b64: Optional[str] = Field(default=None, max_length=7_000_000)
     media_mime: Optional[str] = Field(default=None, max_length=80)
     media_name: Optional[str] = Field(default=None, max_length=180)
+    media_url: Optional[str] = Field(default=None, max_length=600)
+    media_public_id: Optional[str] = Field(default=None, max_length=260)
+    media_resource_type: Optional[str] = Field(default=None, max_length=30)
     thumbnail_b64: Optional[str] = Field(default=None, max_length=2_000_000)
     thumbnail_mime: Optional[str] = Field(default="image/jpeg", max_length=80)
+
+
+class SocialMediaSignIn(BaseModel):
+    resource_type: Literal["auto", "image", "video", "raw"] = "auto"
 
 
 class SocialPublishIn(BaseModel):
@@ -1897,10 +1908,21 @@ async def google_search_console_report(body: GoogleDateRangeIn, user: dict = Dep
 async def _upload_youtube_video_for_user(user_id: str, payload: dict) -> dict:
     token = await _google_access_token(user_id, "https://www.googleapis.com/auth/youtube.upload")
     try:
-        video = base64.b64decode(payload["video_b64"])
+        if payload.get("video_b64"):
+            video = base64.b64decode(payload["video_b64"])
+        elif payload.get("media_url"):
+            async with httpx.AsyncClient(timeout=90, follow_redirects=True) as http:
+                media_response = await http.get(payload["media_url"])
+            if media_response.status_code >= 400:
+                raise HTTPException(502, "Could not download media from storage")
+            video = media_response.content
+        else:
+            raise ValueError("missing media")
         thumbnail = base64.b64decode(payload["thumbnail_b64"]) if payload.get("thumbnail_b64") else None
+    except HTTPException:
+        raise
     except Exception:
-        raise HTTPException(400, "Invalid base64 media payload")
+        raise HTTPException(400, "Invalid media payload")
     metadata = {
         "snippet": {
             "title": payload["title"][:100],
@@ -2057,6 +2079,19 @@ def _fallback_social_pack(objective: str, platforms: List[str]) -> dict:
     }
 
 
+def _cloudinary_configured() -> bool:
+    return bool(CLOUDINARY_CLOUD_NAME and CLOUDINARY_API_KEY and CLOUDINARY_API_SECRET)
+
+
+def _cloudinary_signature(params: dict) -> str:
+    clean = {
+        k: v for k, v in params.items()
+        if v is not None and v != "" and k not in {"file", "api_key", "resource_type", "cloud_name"}
+    }
+    to_sign = "&".join(f"{k}={clean[k]}" for k in sorted(clean))
+    return hashlib.sha1(f"{to_sign}{CLOUDINARY_API_SECRET}".encode()).hexdigest()
+
+
 async def _generate_social_pack(objective: str, platforms: List[str]) -> dict:
     prompt = f"""
 Create a platform-specific social media publishing pack for UnnatiX Technologies.
@@ -2104,7 +2139,7 @@ async def _approve_social_post(user_id: str, post: dict) -> None:
     youtube_uploaded = False
     if (
         "youtube" in post.get("platforms", [])
-        and post.get("media_b64")
+        and (post.get("media_b64") or post.get("media_url"))
         and (post.get("media_mime") or "").startswith("video/")
         and not platform_results.get("youtube", {}).get("video_id")
     ):
@@ -2118,7 +2153,8 @@ async def _approve_social_post(user_id: str, post: dict) -> None:
         result = await _upload_youtube_video_for_user(user_id, {
             "title": youtube_title,
             "description": youtube_description,
-            "video_b64": post["media_b64"],
+            "video_b64": post.get("media_b64"),
+            "media_url": post.get("media_url"),
             "mime": post.get("media_mime") or "video/mp4",
             "media_name": post.get("media_name") or "video.mp4",
             "privacy_status": "private",
@@ -2224,6 +2260,26 @@ async def list_social_posts(user: dict = Depends(current_user)):
     return posts
 
 
+@api.post("/social/media/sign")
+async def sign_social_media_upload(body: SocialMediaSignIn, user: dict = Depends(current_user)):
+    if not _cloudinary_configured():
+        raise HTTPException(400, "Cloudinary is not configured. Add CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY and CLOUDINARY_API_SECRET.")
+    timestamp = int(datetime.now(timezone.utc).timestamp())
+    params = {
+        "timestamp": timestamp,
+        "folder": f"{CLOUDINARY_UPLOAD_FOLDER}/{user['id']}",
+    }
+    return {
+        "cloud_name": CLOUDINARY_CLOUD_NAME,
+        "api_key": CLOUDINARY_API_KEY,
+        "timestamp": timestamp,
+        "folder": params["folder"],
+        "signature": _cloudinary_signature(params),
+        "resource_type": body.resource_type,
+        "upload_url": f"https://api.cloudinary.com/v1_1/{CLOUDINARY_CLOUD_NAME}/{body.resource_type}/upload",
+    }
+
+
 @api.post("/social/drafts")
 async def create_social_draft(body: SocialDraftIn, user: dict = Depends(current_user)):
     platforms = body.platforms or ["instagram", "facebook", "linkedin"]
@@ -2249,9 +2305,12 @@ async def create_social_draft(body: SocialDraftIn, user: dict = Depends(current_
         "media_b64": body.media_b64,
         "media_mime": body.media_mime,
         "media_name": body.media_name,
+        "media_url": body.media_url,
+        "media_public_id": body.media_public_id,
+        "media_resource_type": body.media_resource_type,
         "thumbnail_b64": body.thumbnail_b64,
         "thumbnail_mime": body.thumbnail_mime,
-        "media_attached": bool(body.media_b64),
+        "media_attached": bool(body.media_b64 or body.media_url),
         "platform_results": {},
         "scheduled_at": body.scheduled_at,
         "created_at": now,

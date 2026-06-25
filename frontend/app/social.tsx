@@ -64,6 +64,7 @@ export default function SocialManager() {
   const [campaignName, setCampaignName] = useState('Delhi NCR Growth Campaign');
   const [selected, setSelected] = useState<Platform[]>(['instagram', 'facebook', 'linkedin', 'youtube']);
   const [mediaB64, setMediaB64] = useState('');
+  const [mediaFile, setMediaFile] = useState<any>(null);
   const [mediaName, setMediaName] = useState('');
   const [mediaMime, setMediaMime] = useState('');
   const [mediaSize, setMediaSize] = useState(0);
@@ -98,23 +99,34 @@ export default function SocialManager() {
     input.onchange = () => {
       const file = input.files?.[0];
       if (!file) return;
-      if (file.size > 4 * 1024 * 1024) {
-        setMediaError('For this Vercel MVP, upload a compressed file under 4 MB. Large-video storage is next phase.');
-        return;
-      }
-      const reader = new FileReader();
-      reader.onload = () => {
-        const result = String(reader.result || '');
-        const b64 = result.includes(',') ? result.split(',')[1] : result;
-        setMediaB64(b64);
-        setMediaName(file.name);
-        setMediaMime(file.type || 'application/octet-stream');
-        setMediaSize(file.size);
-      };
-      reader.onerror = () => setMediaError('Could not read the selected file.');
-      reader.readAsDataURL(file);
+      setMediaFile(file);
+      setMediaB64('');
+      setMediaName(file.name);
+      setMediaMime(file.type || 'application/octet-stream');
+      setMediaSize(file.size);
     };
     input.click();
+  };
+
+  const uploadMediaIfNeeded = async () => {
+    if (!mediaFile) return {};
+    const signed = await api<any>('/social/media/sign', { method: 'POST', body: { resource_type: 'auto' } });
+    const form = new FormData();
+    form.append('file', mediaFile);
+    form.append('api_key', signed.api_key);
+    form.append('timestamp', String(signed.timestamp));
+    form.append('folder', signed.folder);
+    form.append('signature', signed.signature);
+    const res = await fetch(signed.upload_url, { method: 'POST', body: form });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data?.error?.message || 'Media upload failed');
+    return {
+      media_url: data.secure_url,
+      media_public_id: data.public_id,
+      media_resource_type: data.resource_type,
+      media_mime: mediaMime,
+      media_name: mediaName,
+    };
   };
 
   const connect = async () => {
@@ -134,6 +146,7 @@ export default function SocialManager() {
     if (!objective.trim() || selected.length === 0) return;
     setBusy(true);
     try {
+      const uploaded = await uploadMediaIfNeeded();
       await api('/social/drafts', {
         method: 'POST',
         body: {
@@ -144,13 +157,17 @@ export default function SocialManager() {
           media_b64: mediaB64 || undefined,
           media_mime: mediaMime || undefined,
           media_name: mediaName || undefined,
+          ...uploaded,
         },
       });
       setMediaB64('');
+      setMediaFile(null);
       setMediaName('');
       setMediaMime('');
       setMediaSize(0);
       await load();
+    } catch (e: any) {
+      setMediaError(e?.message || 'Could not upload/generate social post.');
     } finally {
       setBusy(false);
     }
@@ -243,7 +260,7 @@ export default function SocialManager() {
             <View style={{ flex: 1 }}>
               <Text style={s.uploadTitle}>Upload one video/creative</Text>
               <Text style={s.uploadSub}>
-                {mediaName ? `${mediaName} · ${(mediaSize / 1024 / 1024).toFixed(2)} MB · ${mediaMime}` : 'Same media goes to selected platforms; Harshita adapts captions, title and description.'}
+                {mediaName ? `${mediaName} · ${(mediaSize / 1024 / 1024).toFixed(2)} MB · ${mediaMime}` : 'Same media uploads to Cloudinary, then Harshita adapts captions, title and description per platform.'}
               </Text>
             </View>
             <Pressable onPress={pickMedia} style={s.secondaryBtn}>
