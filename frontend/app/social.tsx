@@ -24,7 +24,11 @@ type SocialPost = {
   status: string;
   summary?: string;
   asset_brief?: string;
-  per_platform?: Record<string, { caption?: string; hashtags?: string[]; creative_brief?: string; label?: string }>;
+  per_platform?: Record<string, { title?: string; description?: string; caption?: string; hashtags?: string[]; creative_brief?: string; label?: string }>;
+  media_attached?: boolean;
+  media_name?: string;
+  media_mime?: string;
+  platform_results?: Record<string, { status?: string; video_id?: string; url?: string }>;
   scheduled_at?: string;
   created_at: string;
 };
@@ -43,6 +47,7 @@ const STATUS_LABELS: Record<string, string> = {
   scheduled: 'SCHEDULED',
   approved_ready_to_publish: 'APPROVED · READY TO PUBLISH',
   approved_needs_platform_connection: 'APPROVED · CONNECT LIVE PLATFORM',
+  published_partial: 'PUBLISHED · PARTIAL',
   rejected: 'REJECTED',
 };
 
@@ -57,7 +62,12 @@ export default function SocialManager() {
   const [profileHandle, setProfileHandle] = useState('@unnatixtechnologies');
   const [objective, setObjective] = useState('Create a 7-day content push for Delhi NCR businesses showing how UnnatiX improves SEO, social media, ads and website lead generation.');
   const [campaignName, setCampaignName] = useState('Delhi NCR Growth Campaign');
-  const [selected, setSelected] = useState<Platform[]>(['instagram', 'facebook', 'linkedin']);
+  const [selected, setSelected] = useState<Platform[]>(['instagram', 'facebook', 'linkedin', 'youtube']);
+  const [mediaB64, setMediaB64] = useState('');
+  const [mediaName, setMediaName] = useState('');
+  const [mediaMime, setMediaMime] = useState('');
+  const [mediaSize, setMediaSize] = useState(0);
+  const [mediaError, setMediaError] = useState('');
 
   const load = useCallback(async () => {
     try {
@@ -74,6 +84,37 @@ export default function SocialManager() {
 
   const togglePlatform = (platform: Platform) => {
     setSelected(prev => prev.includes(platform) ? prev.filter(p => p !== platform) : [...prev, platform]);
+  };
+
+  const pickMedia = async () => {
+    setMediaError('');
+    if (typeof document === 'undefined') {
+      setMediaError('File upload is available on web only right now.');
+      return;
+    }
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = 'video/*,image/*';
+    input.onchange = () => {
+      const file = input.files?.[0];
+      if (!file) return;
+      if (file.size > 4 * 1024 * 1024) {
+        setMediaError('For this Vercel MVP, upload a compressed file under 4 MB. Large-video storage is next phase.');
+        return;
+      }
+      const reader = new FileReader();
+      reader.onload = () => {
+        const result = String(reader.result || '');
+        const b64 = result.includes(',') ? result.split(',')[1] : result;
+        setMediaB64(b64);
+        setMediaName(file.name);
+        setMediaMime(file.type || 'application/octet-stream');
+        setMediaSize(file.size);
+      };
+      reader.onerror = () => setMediaError('Could not read the selected file.');
+      reader.readAsDataURL(file);
+    };
+    input.click();
   };
 
   const connect = async () => {
@@ -100,8 +141,15 @@ export default function SocialManager() {
           campaign_name: campaignName.trim() || 'Harshita Social Campaign',
           platforms: selected,
           requires_approval: true,
+          media_b64: mediaB64 || undefined,
+          media_mime: mediaMime || undefined,
+          media_name: mediaName || undefined,
         },
       });
+      setMediaB64('');
+      setMediaName('');
+      setMediaMime('');
+      setMediaSize(0);
       await load();
     } finally {
       setBusy(false);
@@ -191,9 +239,22 @@ export default function SocialManager() {
               </Pressable>
             ))}
           </ScrollView>
+          <View style={s.uploadBox}>
+            <View style={{ flex: 1 }}>
+              <Text style={s.uploadTitle}>Upload one video/creative</Text>
+              <Text style={s.uploadSub}>
+                {mediaName ? `${mediaName} · ${(mediaSize / 1024 / 1024).toFixed(2)} MB · ${mediaMime}` : 'Same media goes to selected platforms; Harshita adapts captions, title and description.'}
+              </Text>
+            </View>
+            <Pressable onPress={pickMedia} style={s.secondaryBtn}>
+              <Ionicons name="cloud-upload" size={15} color={theme.color.brand} />
+              <Text style={s.secondaryText}>{mediaName ? 'Change' : 'Choose file'}</Text>
+            </Pressable>
+          </View>
+          {!!mediaError && <Text style={s.errorText}>{mediaError}</Text>}
           <View style={s.notice}>
             <Ionicons name="shield-checkmark" size={16} color={theme.color.warning} />
-            <Text style={s.noticeText}>Generated posts go to Founder Approvals first. Automatic live posting needs Meta/LinkedIn OAuth connection.</Text>
+            <Text style={s.noticeText}>Generated posts go to Founder Approvals first. YouTube can publish after approval; Meta/LinkedIn/X still need live publisher tokens.</Text>
           </View>
           <Pressable disabled={busy || selected.length === 0} onPress={generate} style={[s.primaryBtn, selected.length === 0 && { opacity: 0.5 }]}>
             {busy ? <ActivityIndicator size="small" color="#fff" /> : <Text style={s.primaryText}>Generate + send to approval</Text>}
@@ -223,13 +284,17 @@ export default function SocialManager() {
               ))}
             </View>
             {!!post.asset_brief && <Text style={s.assetBrief}>Creative: {post.asset_brief}</Text>}
-            {post.platforms.slice(0, 3).map(p => {
+            {post.media_attached && <Text style={s.mediaTag}>MEDIA ATTACHED · {post.media_name || post.media_mime || 'creative/video'}</Text>}
+            {!!post.platform_results?.youtube?.url && <Text style={s.youtubeUrl}>YouTube: {post.platform_results.youtube.url}</Text>}
+            {post.platforms.slice(0, 5).map(p => {
               const item = post.per_platform?.[p];
-              if (!item?.caption) return null;
+              if (!item?.caption && !item?.title && !item?.description) return null;
               return (
                 <View key={`${post.id}-${p}`} style={s.captionBox}>
                   <Text style={s.captionLabel}>{item.label || p}</Text>
-                  <Text style={s.caption} numberOfLines={5}>{item.caption}</Text>
+                  {!!item.title && <Text style={s.ytTitle}>{item.title}</Text>}
+                  {!!item.description && <Text style={s.caption} numberOfLines={4}>{item.description}</Text>}
+                  {!!item.caption && <Text style={s.caption} numberOfLines={5}>{item.caption}</Text>}
                 </View>
               );
             })}
@@ -279,6 +344,12 @@ const s = StyleSheet.create({
   textarea: { minHeight: 120, textAlignVertical: 'top', lineHeight: 18 },
   notice: { flexDirection: 'row', gap: 8, alignItems: 'flex-start', backgroundColor: theme.color.warning + '12', borderWidth: 1, borderColor: theme.color.warning + '44', borderRadius: theme.radius.md, padding: theme.spacing.md },
   noticeText: { color: theme.color.onSurfaceSecondary, flex: 1, fontSize: 12, lineHeight: 17 },
+  uploadBox: { flexDirection: 'row', alignItems: 'center', gap: 12, backgroundColor: theme.color.surface, borderWidth: 1, borderColor: theme.color.border, borderRadius: theme.radius.md, padding: theme.spacing.md },
+  uploadTitle: { color: theme.color.onSurface, fontSize: 13, fontWeight: '800' },
+  uploadSub: { color: theme.color.onSurfaceTertiary, fontSize: 11, lineHeight: 16, marginTop: 3 },
+  secondaryBtn: { flexDirection: 'row', alignItems: 'center', gap: 6, borderWidth: 1, borderColor: theme.color.brand + '66', borderRadius: theme.radius.md, paddingHorizontal: 12, paddingVertical: 10 },
+  secondaryText: { color: theme.color.brand, fontSize: 12, fontWeight: '800' },
+  errorText: { color: theme.color.error, fontSize: 12, lineHeight: 17 },
   primaryBtn: { backgroundColor: theme.color.brand, borderRadius: theme.radius.md, paddingVertical: 13, alignItems: 'center', justifyContent: 'center' },
   primaryText: { color: '#fff', fontWeight: '900', letterSpacing: 0.3 },
   empty: { backgroundColor: theme.color.surfaceSecondary, borderWidth: 1, borderColor: theme.color.border, borderRadius: theme.radius.md, padding: theme.spacing.xl },
@@ -292,7 +363,10 @@ const s = StyleSheet.create({
   platformPill: { flexDirection: 'row', alignItems: 'center', gap: 5, paddingHorizontal: 8, paddingVertical: 5, borderRadius: theme.radius.pill, backgroundColor: theme.color.brand + '14', borderWidth: 1, borderColor: theme.color.brand + '44' },
   platformText: { color: theme.color.brand, fontSize: 10, fontWeight: '800', textTransform: 'uppercase' },
   assetBrief: { color: theme.color.onSurfaceSecondary, fontSize: 12, lineHeight: 17, marginTop: theme.spacing.md },
+  mediaTag: { alignSelf: 'flex-start', color: theme.color.success, borderWidth: 1, borderColor: theme.color.success + '55', borderRadius: theme.radius.pill, paddingHorizontal: 8, paddingVertical: 4, fontSize: 9, fontWeight: '900', marginTop: theme.spacing.md, letterSpacing: 0.4 },
+  youtubeUrl: { color: theme.color.info, fontSize: 12, lineHeight: 17, marginTop: theme.spacing.md },
   captionBox: { marginTop: theme.spacing.md, backgroundColor: theme.color.surface, borderWidth: 1, borderColor: theme.color.border, borderRadius: theme.radius.md, padding: theme.spacing.md },
   captionLabel: { color: theme.color.brandSecondary, fontSize: 10, fontWeight: '900', letterSpacing: 0.6, textTransform: 'uppercase' },
+  ytTitle: { color: theme.color.onSurface, fontSize: 13, fontWeight: '900', marginTop: 6, lineHeight: 18 },
   caption: { color: theme.color.onSurfaceSecondary, fontSize: 12, lineHeight: 18, marginTop: 6 },
 });

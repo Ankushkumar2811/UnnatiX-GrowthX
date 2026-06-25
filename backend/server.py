@@ -333,6 +333,11 @@ class SocialDraftIn(BaseModel):
     platforms: List[Literal["instagram", "facebook", "linkedin", "x", "youtube"]] = Field(default_factory=list)
     scheduled_at: Optional[datetime] = None
     requires_approval: bool = True
+    media_b64: Optional[str] = Field(default=None, max_length=7_000_000)
+    media_mime: Optional[str] = Field(default=None, max_length=80)
+    media_name: Optional[str] = Field(default=None, max_length=180)
+    thumbnail_b64: Optional[str] = Field(default=None, max_length=2_000_000)
+    thumbnail_mime: Optional[str] = Field(default="image/jpeg", max_length=80)
 
 
 class SocialPublishIn(BaseModel):
@@ -1889,17 +1894,20 @@ async def google_search_console_report(body: GoogleDateRangeIn, user: dict = Dep
     )
 
 
-@api.post("/google/youtube/upload")
-async def google_youtube_upload(body: YouTubeUploadIn, user: dict = Depends(current_user)):
-    token = await _google_access_token(user["id"], "https://www.googleapis.com/auth/youtube.upload")
+async def _upload_youtube_video_for_user(user_id: str, payload: dict) -> dict:
+    token = await _google_access_token(user_id, "https://www.googleapis.com/auth/youtube.upload")
     try:
-        video = base64.b64decode(body.video_b64)
-        thumbnail = base64.b64decode(body.thumbnail_b64) if body.thumbnail_b64 else None
+        video = base64.b64decode(payload["video_b64"])
+        thumbnail = base64.b64decode(payload["thumbnail_b64"]) if payload.get("thumbnail_b64") else None
     except Exception:
         raise HTTPException(400, "Invalid base64 media payload")
     metadata = {
-        "snippet": {"title": body.title, "description": body.description, "tags": body.tags},
-        "status": {"privacyStatus": body.privacy_status},
+        "snippet": {
+            "title": payload["title"][:100],
+            "description": payload.get("description", ""),
+            "tags": payload.get("tags", []),
+        },
+        "status": {"privacyStatus": payload.get("privacy_status", "private")},
     }
     async with httpx.AsyncClient(timeout=55, headers={"Authorization": f"Bearer {token}"}) as http:
         response = await http.post(
@@ -1907,7 +1915,7 @@ async def google_youtube_upload(body: YouTubeUploadIn, user: dict = Depends(curr
             params={"part": "snippet,status", "uploadType": "multipart"},
             files={
                 "metadata": ("metadata.json", json.dumps(metadata), "application/json; charset=UTF-8"),
-                "media": ("video.mp4", video, body.mime),
+                "media": (payload.get("media_name") or "video.mp4", video, payload.get("mime") or "video/mp4"),
             },
         )
         if response.status_code >= 400:
@@ -1919,9 +1927,24 @@ async def google_youtube_upload(body: YouTubeUploadIn, user: dict = Depends(curr
                 "https://www.googleapis.com/upload/youtube/v3/thumbnails/set",
                 params={"videoId": result["id"], "uploadType": "media"},
                 content=thumbnail,
-                headers={"Content-Type": body.thumbnail_mime},
+                headers={"Content-Type": payload.get("thumbnail_mime") or "image/jpeg"},
             )
             result["thumbnail_status"] = "uploaded" if thumb_response.status_code < 400 else "failed"
+    return result
+
+
+@api.post("/google/youtube/upload")
+async def google_youtube_upload(body: YouTubeUploadIn, user: dict = Depends(current_user)):
+    result = await _upload_youtube_video_for_user(user["id"], {
+        "title": body.title,
+        "description": body.description,
+        "video_b64": body.video_b64,
+        "mime": body.mime,
+        "privacy_status": body.privacy_status,
+        "tags": body.tags,
+        "thumbnail_b64": body.thumbnail_b64,
+        "thumbnail_mime": body.thumbnail_mime,
+    })
     await log_activity(user["id"], "marketing", f"YouTube video uploaded: {body.title}", "social")
     return result
 
@@ -2022,6 +2045,8 @@ def _fallback_social_pack(objective: str, platforms: List[str]) -> dict:
             "platform": platform,
             "label": label,
             "caption": caption[:2200],
+            "title": f"{topic[:72]} | UnnatiX GrowthX" if platform == "youtube" else "",
+            "description": f"{caption}\n\nUnnatiX Technologies helps Indian businesses grow with SEO, social media, ads, websites and analytics." if platform == "youtube" else "",
             "hashtags": ["#UnnatiX", "#DigitalMarketing", "#GrowthMarketing"],
             "creative_brief": "Use UnnatiX black/orange brand style, one strong headline, proof/benefit visual, and a clear CTA.",
         }
@@ -2046,7 +2071,8 @@ Return ONLY valid JSON with:
   "summary": "short campaign summary",
   "asset_brief": "visual direction for designer/image agent",
   "per_platform": {{
-    "instagram": {{"platform": "instagram", "label": "Instagram", "caption": "...", "hashtags": ["#..."], "creative_brief": "..."}}
+    "instagram": {{"platform": "instagram", "label": "Instagram", "caption": "...", "hashtags": ["#..."], "creative_brief": "..."}},
+    "youtube": {{"platform": "youtube", "label": "YouTube Shorts", "title": "...", "description": "...", "caption": "short hook/script", "hashtags": ["#..."], "creative_brief": "..."}}
   }}
 }}
 
@@ -2055,6 +2081,7 @@ Rules:
 - Keep captions practical, founder-led and conversion-focused.
 - Do not claim results, clients, awards or metrics unless provided in the objective.
 - Every platform must have a clear CTA.
+- For YouTube, produce a searchable title under 100 characters and a full description with CTA and hashtags.
 """
     try:
         raw = await llm_complete(AGENT_SYSTEM_PROMPTS["marketing"], prompt, expect_json=True)
@@ -2073,6 +2100,41 @@ async def _approve_social_post(user_id: str, post: dict) -> None:
     if scheduled_at and scheduled_at.tzinfo is None:
         scheduled_at = scheduled_at.replace(tzinfo=timezone.utc)
 
+    platform_results = post.get("platform_results") or {}
+    youtube_uploaded = False
+    if (
+        "youtube" in post.get("platforms", [])
+        and post.get("media_b64")
+        and (post.get("media_mime") or "").startswith("video/")
+        and not platform_results.get("youtube", {}).get("video_id")
+    ):
+        youtube_meta = (post.get("per_platform") or {}).get("youtube", {})
+        youtube_title = (youtube_meta.get("title") or post.get("campaign_name") or "UnnatiX GrowthX update")[:100]
+        youtube_description = youtube_meta.get("description") or youtube_meta.get("caption") or post.get("objective", "")
+        tags = [
+            tag.lstrip("#") for tag in (youtube_meta.get("hashtags") or [])
+            if isinstance(tag, str) and tag.strip()
+        ][:15]
+        result = await _upload_youtube_video_for_user(user_id, {
+            "title": youtube_title,
+            "description": youtube_description,
+            "video_b64": post["media_b64"],
+            "mime": post.get("media_mime") or "video/mp4",
+            "media_name": post.get("media_name") or "video.mp4",
+            "privacy_status": "private",
+            "tags": tags,
+            "thumbnail_b64": post.get("thumbnail_b64"),
+            "thumbnail_mime": post.get("thumbnail_mime") or "image/jpeg",
+        })
+        youtube_uploaded = True
+        platform_results["youtube"] = {
+            "status": "published_private",
+            "video_id": result.get("id"),
+            "url": f"https://www.youtube.com/watch?v={result.get('id')}" if result.get("id") else "",
+            "raw": result,
+            "published_at": now,
+        }
+
     live_accounts = await db.social_accounts.count_documents({
         "user_id": user_id,
         "platform": {"$in": post.get("platforms", [])},
@@ -2081,6 +2143,9 @@ async def _approve_social_post(user_id: str, post: dict) -> None:
     if scheduled_at and scheduled_at > now:
         status_value = "scheduled"
         activity = f"Harshita scheduled social pack for {scheduled_at.strftime('%Y-%m-%d %H:%M UTC')}"
+    elif youtube_uploaded:
+        status_value = "published_partial"
+        activity = "Harshita published the approved video to YouTube; other selected platforms are ready for their live connectors"
     elif live_accounts > 0:
         status_value = "approved_ready_to_publish"
         activity = "Harshita social pack approved; live platform publisher is ready for connector-specific posting"
@@ -2090,6 +2155,7 @@ async def _approve_social_post(user_id: str, post: dict) -> None:
 
     await db.social_posts.update_one({"id": post["id"], "user_id": user_id}, {"$set": {
         "status": status_value,
+        "platform_results": platform_results,
         "approved_at": now,
         "updated_at": now,
     }})
@@ -2151,7 +2217,10 @@ async def disconnect_social_account(platform: str, user: dict = Depends(current_
 
 @api.get("/social/posts")
 async def list_social_posts(user: dict = Depends(current_user)):
-    posts = await db.social_posts.find({"user_id": user["id"]}, {"_id": 0}).sort("created_at", -1).to_list(100)
+    posts = await db.social_posts.find(
+        {"user_id": user["id"]},
+        {"_id": 0, "media_b64": 0, "thumbnail_b64": 0},
+    ).sort("created_at", -1).to_list(100)
     return posts
 
 
@@ -2177,6 +2246,13 @@ async def create_social_draft(body: SocialDraftIn, user: dict = Depends(current_
         "summary": pack.get("summary", ""),
         "asset_brief": pack.get("asset_brief", ""),
         "per_platform": pack.get("per_platform", {}),
+        "media_b64": body.media_b64,
+        "media_mime": body.media_mime,
+        "media_name": body.media_name,
+        "thumbnail_b64": body.thumbnail_b64,
+        "thumbnail_mime": body.thumbnail_mime,
+        "media_attached": bool(body.media_b64),
+        "platform_results": {},
         "scheduled_at": body.scheduled_at,
         "created_at": now,
         "updated_at": now,
@@ -2185,7 +2261,7 @@ async def create_social_draft(body: SocialDraftIn, user: dict = Depends(current_
 
     if body.requires_approval:
         preview_lines = [
-            f"{SOCIAL_PLATFORM_LABELS[p]}: {(post['per_platform'].get(p, {}).get('caption') or '')[:220]}"
+            f"{SOCIAL_PLATFORM_LABELS[p]}: {((post['per_platform'].get(p, {}).get('title') or '') + ' — ' if p == 'youtube' and post['per_platform'].get(p, {}).get('title') else '')}{(post['per_platform'].get(p, {}).get('caption') or post['per_platform'].get(p, {}).get('description') or '')[:220]}"
             for p in platforms
         ]
         appr = {
