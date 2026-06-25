@@ -14,7 +14,7 @@ import base64
 import hmac
 from email.message import EmailMessage
 from email.utils import formataddr, make_msgid, parseaddr
-from urllib.parse import urljoin, urlparse
+from urllib.parse import quote, urljoin, urlparse
 from urllib.robotparser import RobotFileParser
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -63,6 +63,13 @@ GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID", "")
 GOOGLE_CLIENT_SECRET = os.environ.get("GOOGLE_CLIENT_SECRET", "")
 GOOGLE_REDIRECT_URI = os.environ.get("GOOGLE_REDIRECT_URI", "https://backend-zeta-seven-97.vercel.app/api/integrations/google/callback")
 GOOGLE_OAUTH_ENCRYPTION_KEY = os.environ.get("GOOGLE_OAUTH_ENCRYPTION_KEY", "") or JWT_SECRET
+GOOGLE_SERVICE_ACCOUNT_JSON_B64 = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON_B64", "")
+GOOGLE_BUSINESS_ACCOUNT_ID = os.environ.get("GOOGLE_BUSINESS_ACCOUNT_ID", "")
+GOOGLE_BUSINESS_LOCATION_ID = os.environ.get("GOOGLE_BUSINESS_LOCATION_ID", "")
+GA4_PROPERTY_ID = os.environ.get("GA4_PROPERTY_ID", "")
+SEARCH_CONSOLE_SITE_URL = os.environ.get("SEARCH_CONSOLE_SITE_URL", "")
+YOUTUBE_CLIENT_ID = os.environ.get("YOUTUBE_CLIENT_ID", "")
+YOUTUBE_CLIENT_SECRET = os.environ.get("YOUTUBE_CLIENT_SECRET", "")
 DAILY_EMAIL_LIMIT = int(os.environ.get("DAILY_EMAIL_LIMIT", "25"))
 CRON_SECRET = os.environ.get("CRON_SECRET", "")
 LLM_PROVIDER_ORDER = [
@@ -330,6 +337,23 @@ class SocialDraftIn(BaseModel):
 
 class SocialPublishIn(BaseModel):
     post_id: str
+
+
+class GoogleDateRangeIn(BaseModel):
+    start_date: Optional[str] = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
+    end_date: Optional[str] = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
+    row_limit: int = Field(default=10, ge=1, le=100)
+
+
+class YouTubeUploadIn(BaseModel):
+    title: str = Field(min_length=2, max_length=100)
+    description: str = Field(default="", max_length=5000)
+    video_b64: str = Field(min_length=20)
+    mime: str = Field(default="video/mp4", max_length=80)
+    privacy_status: Literal["private", "unlisted", "public"] = "private"
+    tags: List[str] = Field(default_factory=list)
+    thumbnail_b64: Optional[str] = None
+    thumbnail_mime: str = "image/jpeg"
 
 
 class SMTPTestIn(BaseModel):
@@ -1490,13 +1514,26 @@ GOOGLE_SCOPES = [
     "openid", "email",
     "https://www.googleapis.com/auth/gmail.readonly",
     "https://www.googleapis.com/auth/calendar.events",
+    "https://www.googleapis.com/auth/business.manage",
+    "https://www.googleapis.com/auth/analytics.readonly",
+    "https://www.googleapis.com/auth/webmasters.readonly",
+    "https://www.googleapis.com/auth/youtube.upload",
 ]
 
 
-async def _google_access_token(user_id: str) -> str:
+def _pkce_pair() -> tuple[str, str]:
+    verifier = base64.urlsafe_b64encode(os.urandom(48)).decode().rstrip("=")
+    digest = hashlib.sha256(verifier.encode()).digest()
+    challenge = base64.urlsafe_b64encode(digest).decode().rstrip("=")
+    return verifier, challenge
+
+
+async def _google_access_token(user_id: str, required_scope: Optional[str] = None) -> str:
     rec = await db.integrations.find_one({"user_id": user_id, "id": "google_workspace"}, {"_id": 0})
     if not rec or rec.get("status") != "connected_live":
         raise HTTPException(400, "Connect Google Workspace first")
+    if required_scope and required_scope not in set(rec.get("scopes", [])):
+        raise HTTPException(403, f"Reconnect Google Workspace and approve required scope: {required_scope}")
     expires_at = rec.get("token_expires_at")
     if expires_at and expires_at.tzinfo is None:
         expires_at = expires_at.replace(tzinfo=timezone.utc)
@@ -1517,6 +1554,61 @@ async def _google_access_token(user_id: str) -> str:
         "token_expires_at": datetime.now(timezone.utc) + timedelta(seconds=int(token.get("expires_in", 3600))),
     }})
     return access_token
+
+
+async def _google_get_json(user_id: str, url: str, *, params: Optional[dict] = None, required_scope: Optional[str] = None, timeout: int = 25) -> dict:
+    token = await _google_access_token(user_id, required_scope)
+    async with httpx.AsyncClient(timeout=timeout, headers={"Authorization": f"Bearer {token}"}) as http:
+        response = await http.get(url, params=params)
+    if response.status_code >= 400:
+        logger.warning("Google GET failed %s status=%s", url, response.status_code)
+        raise HTTPException(response.status_code if response.status_code < 500 else 502, "Google API request failed")
+    return response.json()
+
+
+async def _google_post_json(user_id: str, url: str, payload: dict, *, required_scope: Optional[str] = None, timeout: int = 25) -> dict:
+    token = await _google_access_token(user_id, required_scope)
+    async with httpx.AsyncClient(timeout=timeout, headers={"Authorization": f"Bearer {token}"}) as http:
+        response = await http.post(url, json=payload)
+    if response.status_code >= 400:
+        logger.warning("Google POST failed %s status=%s", url, response.status_code)
+        raise HTTPException(response.status_code if response.status_code < 500 else 502, "Google API request failed")
+    return response.json()
+
+
+async def _sync_google_business_profile(user_id: str) -> dict:
+    try:
+        data = await _google_get_json(
+            user_id,
+            "https://mybusinessaccountmanagement.googleapis.com/v1/accounts",
+            required_scope="https://www.googleapis.com/auth/business.manage",
+        )
+        accounts = data.get("accounts", [])
+        first_account = accounts[0] if accounts else None
+        locations = []
+        first_location = None
+        if first_account and first_account.get("name"):
+            loc_data = await _google_get_json(
+                user_id,
+                f"https://mybusinessbusinessinformation.googleapis.com/v1/{first_account['name']}/locations",
+                params={"readMask": "name,title,storefrontAddress,phoneNumbers,websiteUri,metadata"},
+                required_scope="https://www.googleapis.com/auth/business.manage",
+            )
+            locations = loc_data.get("locations", [])
+            first_location = locations[0] if locations else None
+        await db.integrations.update_one({"user_id": user_id, "id": "google_workspace"}, {"$set": {
+            "business_profile": {
+                "accounts": accounts,
+                "locations": locations,
+                "primary_account_id": (first_account or {}).get("name", "").replace("accounts/", ""),
+                "primary_location_id": (first_location or {}).get("name", "").split("/")[-1] if first_location else "",
+                "synced_at": datetime.now(timezone.utc),
+            }
+        }})
+        return {"accounts": len(accounts), "locations": len(locations)}
+    except HTTPException as exc:
+        logger.warning("Google Business Profile sync skipped: %s", exc.detail)
+        return {"accounts": 0, "locations": 0, "error": exc.detail}
 
 
 INTEGRATION_CATALOG = [
@@ -1551,15 +1643,27 @@ async def list_integrations(user: dict = Depends(current_user)):
 async def start_google_oauth(user: dict = Depends(current_user)):
     if not _google_oauth_configured():
         raise HTTPException(400, "Google OAuth environment variables are incomplete")
+    nonce = str(uuid.uuid4())
+    verifier, challenge = _pkce_pair()
+    now = datetime.now(timezone.utc)
+    await db.oauth_states.insert_one({
+        "id": nonce,
+        "user_id": user["id"],
+        "provider": "google",
+        "code_verifier_enc": _encrypt_secret(verifier),
+        "created_at": now,
+        "expires_at": now + timedelta(minutes=10),
+        "used": False,
+    })
     state = jwt.encode({
         "sub": user["id"], "purpose": "google_oauth",
-        "nonce": str(uuid.uuid4()), "exp": datetime.now(timezone.utc) + timedelta(minutes=10),
+        "nonce": nonce, "exp": now + timedelta(minutes=10),
     }, JWT_SECRET, algorithm=JWT_ALG)
     params = {
         "client_id": GOOGLE_CLIENT_ID, "redirect_uri": GOOGLE_REDIRECT_URI,
         "response_type": "code", "scope": " ".join(GOOGLE_SCOPES),
         "access_type": "offline", "prompt": "consent", "include_granted_scopes": "true",
-        "state": state,
+        "state": state, "code_challenge": challenge, "code_challenge_method": "S256",
     }
     return {"auth_url": str(httpx.URL("https://accounts.google.com/o/oauth2/v2/auth", params=params))}
 
@@ -1571,12 +1675,24 @@ async def google_oauth_callback(code: str, state: str):
         if claims.get("purpose") != "google_oauth":
             raise ValueError("invalid purpose")
         user_id = claims["sub"]
+        nonce = claims["nonce"]
     except Exception:
         raise HTTPException(400, "Invalid or expired Google OAuth state")
+    state_doc = await db.oauth_states.find_one({"id": nonce, "user_id": user_id, "provider": "google"}, {"_id": 0})
+    if not state_doc or state_doc.get("used"):
+        raise HTTPException(400, "Google OAuth state was already used or not found")
+    expires_at = state_doc.get("expires_at")
+    if expires_at and expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    if not expires_at or expires_at < datetime.now(timezone.utc):
+        raise HTTPException(400, "Google OAuth state expired")
+    code_verifier = _decrypt_secret(state_doc["code_verifier_enc"])
+    await db.oauth_states.update_one({"id": nonce}, {"$set": {"used": True, "used_at": datetime.now(timezone.utc)}})
     async with httpx.AsyncClient(timeout=25) as http:
         response = await http.post("https://oauth2.googleapis.com/token", data={
             "code": code, "client_id": GOOGLE_CLIENT_ID, "client_secret": GOOGLE_CLIENT_SECRET,
             "redirect_uri": GOOGLE_REDIRECT_URI, "grant_type": "authorization_code",
+            "code_verifier": code_verifier,
         })
         if response.status_code >= 400:
             logger.warning("Google OAuth exchange failed: %s", response.status_code)
@@ -1602,7 +1718,10 @@ async def google_oauth_callback(code: str, state: str):
     else:
         raise HTTPException(502, "Google did not return a refresh token; reconnect and grant consent")
     await db.integrations.update_one({"user_id": user_id, "id": "google_workspace"}, {"$set": update}, upsert=True)
+    business_sync = await _sync_google_business_profile(user_id)
     await log_activity(user_id, "operations", f"Google Workspace connected for {profile.get('email', 'account')}", "integration")
+    if business_sync.get("locations"):
+        await log_activity(user_id, "operations", f"Google Business Profile synced {business_sync['locations']} location(s)", "integration")
     return RedirectResponse(f"{os.environ.get('APP_BASE_URL', 'https://frontend-black-six-9a2u5f36zm.vercel.app')}/integrations?google=connected")
 
 
@@ -1655,6 +1774,156 @@ async def sync_google_replies(user: dict = Depends(current_user)):
             synced += 1
     await log_activity(user["id"], "sales", f"Gmail synced {synced} recent inbox messages", "integration")
     return {"ok": True, "synced": synced}
+
+
+@api.get("/google/status")
+async def google_status(user: dict = Depends(current_user)):
+    rec = await db.integrations.find_one({"user_id": user["id"], "id": "google_workspace"}, {"_id": 0}) or {}
+    scopes = set(rec.get("scopes", []))
+    required = {
+        "gmail": "https://www.googleapis.com/auth/gmail.readonly",
+        "calendar": "https://www.googleapis.com/auth/calendar.events",
+        "business_profile": "https://www.googleapis.com/auth/business.manage",
+        "analytics": "https://www.googleapis.com/auth/analytics.readonly",
+        "search_console": "https://www.googleapis.com/auth/webmasters.readonly",
+        "youtube_upload": "https://www.googleapis.com/auth/youtube.upload",
+    }
+    env = {
+        "GOOGLE_CLIENT_ID": bool(GOOGLE_CLIENT_ID),
+        "GOOGLE_CLIENT_SECRET": bool(GOOGLE_CLIENT_SECRET),
+        "GOOGLE_REDIRECT_URI": bool(GOOGLE_REDIRECT_URI),
+        "GOOGLE_PLACES_API_KEY": bool(GOOGLE_PLACES_API_KEY),
+        "GOOGLE_OAUTH_ENCRYPTION_KEY": bool(os.environ.get("GOOGLE_OAUTH_ENCRYPTION_KEY")),
+        "GOOGLE_SERVICE_ACCOUNT_JSON_B64": bool(GOOGLE_SERVICE_ACCOUNT_JSON_B64),
+        "GOOGLE_BUSINESS_ACCOUNT_ID": bool(GOOGLE_BUSINESS_ACCOUNT_ID),
+        "GOOGLE_BUSINESS_LOCATION_ID": bool(GOOGLE_BUSINESS_LOCATION_ID),
+        "GA4_PROPERTY_ID": bool(GA4_PROPERTY_ID),
+        "SEARCH_CONSOLE_SITE_URL": bool(SEARCH_CONSOLE_SITE_URL),
+        "YOUTUBE_CLIENT_ID": bool(YOUTUBE_CLIENT_ID),
+        "YOUTUBE_CLIENT_SECRET": bool(YOUTUBE_CLIENT_SECRET),
+    }
+    return {
+        "connected": rec.get("status") == "connected_live",
+        "google_email": rec.get("google_email"),
+        "redirect_uri": GOOGLE_REDIRECT_URI,
+        "env": env,
+        "scopes": {name: scope in scopes for name, scope in required.items()},
+        "youtube_reuses_google_oauth_client": True,
+        "business_profile": rec.get("business_profile", {}),
+    }
+
+
+@api.get("/google/business/accounts")
+async def google_business_accounts(user: dict = Depends(current_user)):
+    data = await _google_get_json(
+        user["id"],
+        "https://mybusinessaccountmanagement.googleapis.com/v1/accounts",
+        required_scope="https://www.googleapis.com/auth/business.manage",
+    )
+    return {"accounts": data.get("accounts", [])}
+
+
+@api.get("/google/business/locations")
+async def google_business_locations(account_id: Optional[str] = None, user: dict = Depends(current_user)):
+    account = account_id or GOOGLE_BUSINESS_ACCOUNT_ID
+    if not account:
+        sync = await _sync_google_business_profile(user["id"])
+        rec = await db.integrations.find_one({"user_id": user["id"], "id": "google_workspace"}, {"_id": 0}) or {}
+        account = ((rec.get("business_profile") or {}).get("primary_account_id") or "")
+        if not account:
+            return {"locations": [], "sync": sync}
+    account_name = account if account.startswith("accounts/") else f"accounts/{account}"
+    data = await _google_get_json(
+        user["id"],
+        f"https://mybusinessbusinessinformation.googleapis.com/v1/{account_name}/locations",
+        params={"readMask": "name,title,storefrontAddress,phoneNumbers,websiteUri,metadata"},
+        required_scope="https://www.googleapis.com/auth/business.manage",
+    )
+    return {"account": account_name, "locations": data.get("locations", [])}
+
+
+@api.post("/google/business/sync")
+async def google_business_sync(user: dict = Depends(current_user)):
+    result = await _sync_google_business_profile(user["id"])
+    return {"ok": True, **result}
+
+
+@api.post("/google/analytics/report")
+async def google_analytics_report(body: GoogleDateRangeIn, user: dict = Depends(current_user)):
+    if not GA4_PROPERTY_ID:
+        raise HTTPException(400, "GA4_PROPERTY_ID is not configured")
+    end_date = body.end_date or datetime.now(timezone.utc).date().isoformat()
+    start_date = body.start_date or (datetime.now(timezone.utc).date() - timedelta(days=28)).isoformat()
+    payload = {
+        "dateRanges": [{"startDate": start_date, "endDate": end_date}],
+        "dimensions": [{"name": "sessionDefaultChannelGroup"}],
+        "metrics": [{"name": "sessions"}, {"name": "totalUsers"}, {"name": "conversions"}],
+        "limit": body.row_limit,
+    }
+    return await _google_post_json(
+        user["id"],
+        f"https://analyticsdata.googleapis.com/v1beta/properties/{GA4_PROPERTY_ID}:runReport",
+        payload,
+        required_scope="https://www.googleapis.com/auth/analytics.readonly",
+    )
+
+
+@api.post("/google/search-console/report")
+async def google_search_console_report(body: GoogleDateRangeIn, user: dict = Depends(current_user)):
+    if not SEARCH_CONSOLE_SITE_URL:
+        raise HTTPException(400, "SEARCH_CONSOLE_SITE_URL is not configured")
+    end_date = body.end_date or datetime.now(timezone.utc).date().isoformat()
+    start_date = body.start_date or (datetime.now(timezone.utc).date() - timedelta(days=28)).isoformat()
+    payload = {
+        "startDate": start_date,
+        "endDate": end_date,
+        "dimensions": ["query", "page"],
+        "rowLimit": body.row_limit,
+    }
+    site = quote(SEARCH_CONSOLE_SITE_URL, safe="")
+    return await _google_post_json(
+        user["id"],
+        f"https://searchconsole.googleapis.com/webmasters/v3/sites/{site}/searchAnalytics/query",
+        payload,
+        required_scope="https://www.googleapis.com/auth/webmasters.readonly",
+    )
+
+
+@api.post("/google/youtube/upload")
+async def google_youtube_upload(body: YouTubeUploadIn, user: dict = Depends(current_user)):
+    token = await _google_access_token(user["id"], "https://www.googleapis.com/auth/youtube.upload")
+    try:
+        video = base64.b64decode(body.video_b64)
+        thumbnail = base64.b64decode(body.thumbnail_b64) if body.thumbnail_b64 else None
+    except Exception:
+        raise HTTPException(400, "Invalid base64 media payload")
+    metadata = {
+        "snippet": {"title": body.title, "description": body.description, "tags": body.tags},
+        "status": {"privacyStatus": body.privacy_status},
+    }
+    async with httpx.AsyncClient(timeout=55, headers={"Authorization": f"Bearer {token}"}) as http:
+        response = await http.post(
+            "https://www.googleapis.com/upload/youtube/v3/videos",
+            params={"part": "snippet,status", "uploadType": "multipart"},
+            files={
+                "metadata": ("metadata.json", json.dumps(metadata), "application/json; charset=UTF-8"),
+                "media": ("video.mp4", video, body.mime),
+            },
+        )
+        if response.status_code >= 400:
+            logger.warning("YouTube upload failed status=%s", response.status_code)
+            raise HTTPException(response.status_code if response.status_code < 500 else 502, "YouTube upload failed")
+        result = response.json()
+        if thumbnail and result.get("id"):
+            thumb_response = await http.post(
+                "https://www.googleapis.com/upload/youtube/v3/thumbnails/set",
+                params={"videoId": result["id"], "uploadType": "media"},
+                content=thumbnail,
+                headers={"Content-Type": body.thumbnail_mime},
+            )
+            result["thumbnail_status"] = "uploaded" if thumb_response.status_code < 400 else "failed"
+    await log_activity(user["id"], "marketing", f"YouTube video uploaded: {body.title}", "social")
+    return result
 
 
 @api.post("/integrations/{provider}/toggle")
@@ -1953,6 +2222,20 @@ async def publish_social_post(body: SocialPublishIn, user: dict = Depends(curren
 async def search_live_leads(body: LeadSearchIn, user: dict = Depends(current_user)):
     if not GOOGLE_PLACES_API_KEY:
         raise HTTPException(400, "Google Places API key is not configured")
+    minute_ago = datetime.now(timezone.utc) - timedelta(minutes=1)
+    recent = await db.rate_limits.count_documents({
+        "user_id": user["id"],
+        "key": "google_places_search",
+        "created_at": {"$gte": minute_ago},
+    })
+    if recent >= 30:
+        raise HTTPException(429, "Google Places rate limit reached; wait a minute and retry")
+    await db.rate_limits.insert_one({
+        "id": str(uuid.uuid4()),
+        "user_id": user["id"],
+        "key": "google_places_search",
+        "created_at": datetime.now(timezone.utc),
+    })
     payload = {
         "textQuery": f"{body.query} in {body.location}",
         "maxResultCount": body.max_results,
