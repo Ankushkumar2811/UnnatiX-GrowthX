@@ -1541,6 +1541,7 @@ GOOGLE_SCOPES = [
     "https://www.googleapis.com/auth/analytics.readonly",
     "https://www.googleapis.com/auth/webmasters.readonly",
     "https://www.googleapis.com/auth/youtube.upload",
+    "https://www.googleapis.com/auth/youtube.force-ssl",
 ]
 
 
@@ -1810,6 +1811,7 @@ async def google_status(user: dict = Depends(current_user)):
         "analytics": "https://www.googleapis.com/auth/analytics.readonly",
         "search_console": "https://www.googleapis.com/auth/webmasters.readonly",
         "youtube_upload": "https://www.googleapis.com/auth/youtube.upload",
+        "youtube_manage": "https://www.googleapis.com/auth/youtube.force-ssl",
     }
     env = {
         "GOOGLE_CLIENT_ID": bool(GOOGLE_CLIENT_ID),
@@ -1963,7 +1965,7 @@ async def _upload_youtube_video_for_user(user_id: str, payload: dict) -> dict:
 
 
 async def _update_youtube_privacy(user_id: str, video_id: str, privacy_status: str) -> dict:
-    token = await _google_access_token(user_id, "https://www.googleapis.com/auth/youtube.upload")
+    token = await _google_access_token(user_id, "https://www.googleapis.com/auth/youtube.force-ssl")
     async with httpx.AsyncClient(timeout=30, headers={"Authorization": f"Bearer {token}"}) as http:
         response = await http.put(
             "https://www.googleapis.com/youtube/v3/videos",
