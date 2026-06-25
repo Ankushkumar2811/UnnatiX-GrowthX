@@ -116,6 +116,13 @@ export default function Dashboard() {
             <Text style={s.quickTitle}>Live Leads</Text>
             <Text style={s.quickSub}>Google · website · Hunter</Text>
           </Pressable>
+          <Pressable testID="dashboard-social-link" onPress={() => router.push('/social' as any)} style={s.quickTile}>
+            <Ionicons name="share-social" size={18} color={theme.color.brand} />
+            <Text style={s.quickTitle}>Social Manager</Text>
+            <Text style={s.quickSub}>Harshita · all platforms</Text>
+          </Pressable>
+        </View>
+        <View style={[s.quickRow, { marginTop: 10 }]}>
           <Pressable testID="dashboard-billing-link" onPress={() => router.push('/billing' as any)} style={s.quickTile}>
             <Ionicons name="card" size={18} color={theme.color.brand} />
             <Text style={s.quickTitle}>Billing</Text>

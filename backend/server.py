@@ -313,6 +313,25 @@ class IntegrationToggleIn(BaseModel):
     enabled: bool
 
 
+class SocialAccountIn(BaseModel):
+    platform: Literal["instagram", "facebook", "linkedin", "x", "youtube"]
+    profile_name: str = Field(min_length=2, max_length=100)
+    profile_handle: str = Field(min_length=1, max_length=120)
+    profile_url: Optional[str] = Field(default=None, max_length=300)
+
+
+class SocialDraftIn(BaseModel):
+    objective: str = Field(min_length=4, max_length=1200)
+    campaign_name: str = Field(default="Harshita Social Campaign", min_length=2, max_length=120)
+    platforms: List[Literal["instagram", "facebook", "linkedin", "x", "youtube"]] = Field(default_factory=list)
+    scheduled_at: Optional[datetime] = None
+    requires_approval: bool = True
+
+
+class SocialPublishIn(BaseModel):
+    post_id: str
+
+
 class SMTPTestIn(BaseModel):
     to_email: Optional[EmailStr] = None
 
@@ -887,12 +906,15 @@ async def decide_approval(approval_id: str, body: ApprovalDecisionIn, user: dict
     now = datetime.now(timezone.utc)
     outreach = await db.outreach.find_one({"id": appr["task_id"], "user_id": user["id"]}, {"_id": 0})
     meeting = await db.meetings.find_one({"id": appr["task_id"], "user_id": user["id"]}, {"_id": 0})
+    social_post = await db.social_posts.find_one({"id": appr["task_id"], "user_id": user["id"]}, {"_id": 0})
     if body.decision == "approved":
         if outreach:
             await _send_outreach(user["id"], outreach["id"])
         elif meeting:
             created = await _schedule_google_meeting(user["id"], meeting)
             await db.meetings.update_one({"id": meeting["id"]}, {"$set": {**created, "status": "scheduled"}})
+        elif social_post:
+            await _approve_social_post(user["id"], social_post)
         else:
             await db.tasks.update_one({"id": appr["task_id"]}, {"$set": {
                 "status": "planning", "progress": 25, "execution_status": "queued", "updated_at": now,
@@ -904,6 +926,8 @@ async def decide_approval(approval_id: str, body: ApprovalDecisionIn, user: dict
             await db.leads.update_one({"id": outreach["lead_id"]}, {"$set": {"pipeline_stage": "verified", "updated_at": now}})
         elif meeting:
             await db.meetings.update_one({"id": meeting["id"]}, {"$set": {"status": "cancelled"}})
+        elif social_post:
+            await db.social_posts.update_one({"id": social_post["id"]}, {"$set": {"status": "rejected", "updated_at": now}})
         else:
             await db.tasks.update_one({"id": appr["task_id"]}, {"$set": {
                 "status": "cancelled", "progress": 0, "execution_status": "cancelled", "updated_at": now,
@@ -1498,6 +1522,8 @@ async def _google_access_token(user_id: str) -> str:
 INTEGRATION_CATALOG = [
     {"id": "smtp", "name": "SMTP Email", "category": "Email", "description": "Send real approved outreach and notifications from your company inbox.", "requires_keys": ["SMTP host, user and app password"]},
     {"id": "google_workspace", "name": "Google Workspace", "category": "Email + Calendar", "description": "Read replies and create real Calendar events with Google Meet.", "requires_keys": ["OAuth client ID and secret"]},
+    {"id": "meta_social", "name": "Meta Social", "category": "Social", "description": "Publish approved Facebook Page and Instagram Business posts after Meta OAuth is connected.", "requires_keys": ["Meta app ID, secret, page token"]},
+    {"id": "linkedin_social", "name": "LinkedIn Social", "category": "Social", "description": "Publish approved LinkedIn company updates after LinkedIn OAuth is connected.", "requires_keys": ["LinkedIn client ID and secret"]},
     {"id": "slack", "name": "Slack", "category": "Messaging", "description": "Post approvals & summaries to your team channel.", "requires_keys": ["Bot User OAuth Token"]},
     {"id": "hubspot", "name": "HubSpot", "category": "CRM", "description": "Sync Sales leads & pipeline stages.", "requires_keys": ["Private app access token"]},
     {"id": "notion", "name": "Notion", "category": "Docs", "description": "Mirror Research reports & SOPs to a workspace.", "requires_keys": ["Internal integration token"]},
@@ -1676,6 +1702,248 @@ async def test_smtp(body: SMTPTestIn, user: dict = Depends(current_user)):
     await db.email_events.insert_one(event)
     await log_activity(user["id"], "sales", f"Live SMTP test sent to {recipient}", "integration")
     return {"ok": True, "status": "sent", "message_id": message_id, "to_email": recipient}
+
+
+# ============================================================
+# ROUTES: HARSHITA SOCIAL MANAGER
+# ============================================================
+SOCIAL_PLATFORM_LABELS = {
+    "instagram": "Instagram",
+    "facebook": "Facebook Page",
+    "linkedin": "LinkedIn",
+    "x": "X / Twitter",
+    "youtube": "YouTube Shorts",
+}
+
+
+def _social_accounts_env_live(platform: str) -> bool:
+    if platform in {"instagram", "facebook"}:
+        return bool(os.environ.get("META_PAGE_ACCESS_TOKEN") and os.environ.get("META_PAGE_ID"))
+    if platform == "linkedin":
+        return bool(os.environ.get("LINKEDIN_CLIENT_ID") and os.environ.get("LINKEDIN_CLIENT_SECRET"))
+    if platform == "youtube":
+        return _google_oauth_configured()
+    return False
+
+
+def _fallback_social_pack(objective: str, platforms: List[str]) -> dict:
+    topic = objective.strip()
+    base_cta = "DM UnnatiX Technologies for a free 20-minute growth audit."
+    per_platform = {}
+    for platform in platforms:
+        label = SOCIAL_PLATFORM_LABELS.get(platform, platform.title())
+        if platform == "linkedin":
+            caption = (
+                f"{topic}\n\n"
+                "Most growing Indian businesses do not need more random posts; they need a measurable content system: "
+                "clear offer, weekly proof, local SEO support and conversion tracking.\n\n"
+                f"{base_cta}"
+            )
+        elif platform == "instagram":
+            caption = (
+                f"{topic}\n\n"
+                "3 things to fix this week: stronger hook, proof-based carousel/reel, and a clear WhatsApp/lead-form CTA.\n\n"
+                f"{base_cta}\n\n#DigitalMarketing #DelhiNCRBusiness #UnnatiX"
+            )
+        elif platform == "youtube":
+            caption = f"{topic}\n\nShort script: Hook the pain, show one growth fix, end with: {base_cta}"
+        else:
+            caption = f"{topic}\n\nQuick growth idea: improve visibility, trust and lead capture before spending more on ads. {base_cta}"
+        per_platform[platform] = {
+            "platform": platform,
+            "label": label,
+            "caption": caption[:2200],
+            "hashtags": ["#UnnatiX", "#DigitalMarketing", "#GrowthMarketing"],
+            "creative_brief": "Use UnnatiX black/orange brand style, one strong headline, proof/benefit visual, and a clear CTA.",
+        }
+    return {
+        "summary": "Harshita created a platform-wise social pack with captions, CTA, hashtag direction and creative brief.",
+        "per_platform": per_platform,
+        "asset_brief": "Create one square carousel cover and one vertical reel/shorts frame in UnnatiX black/orange style.",
+    }
+
+
+async def _generate_social_pack(objective: str, platforms: List[str]) -> dict:
+    prompt = f"""
+Create a platform-specific social media publishing pack for UnnatiX Technologies.
+
+Objective:
+{objective}
+
+Platforms: {', '.join(platforms)}
+
+Return ONLY valid JSON with:
+{{
+  "summary": "short campaign summary",
+  "asset_brief": "visual direction for designer/image agent",
+  "per_platform": {{
+    "instagram": {{"platform": "instagram", "label": "Instagram", "caption": "...", "hashtags": ["#..."], "creative_brief": "..."}}
+  }}
+}}
+
+Rules:
+- Write for Indian SMB/business audience.
+- Keep captions practical, founder-led and conversion-focused.
+- Do not claim results, clients, awards or metrics unless provided in the objective.
+- Every platform must have a clear CTA.
+"""
+    try:
+        raw = await llm_complete(AGENT_SYSTEM_PROMPTS["marketing"], prompt, expect_json=True)
+        data = json.loads(raw)
+        if not isinstance(data.get("per_platform"), dict):
+            raise ValueError("missing per_platform")
+        return data
+    except Exception as exc:
+        logger.warning("Social pack LLM fallback used: %s", type(exc).__name__)
+        return _fallback_social_pack(objective, platforms)
+
+
+async def _approve_social_post(user_id: str, post: dict) -> None:
+    now = datetime.now(timezone.utc)
+    scheduled_at = post.get("scheduled_at")
+    if scheduled_at and scheduled_at.tzinfo is None:
+        scheduled_at = scheduled_at.replace(tzinfo=timezone.utc)
+
+    live_accounts = await db.social_accounts.count_documents({
+        "user_id": user_id,
+        "platform": {"$in": post.get("platforms", [])},
+        "status": "connected_live",
+    })
+    if scheduled_at and scheduled_at > now:
+        status_value = "scheduled"
+        activity = f"Harshita scheduled social pack for {scheduled_at.strftime('%Y-%m-%d %H:%M UTC')}"
+    elif live_accounts > 0:
+        status_value = "approved_ready_to_publish"
+        activity = "Harshita social pack approved; live platform publisher is ready for connector-specific posting"
+    else:
+        status_value = "approved_needs_platform_connection"
+        activity = "Harshita social pack approved; connect Meta/LinkedIn live OAuth before automatic posting"
+
+    await db.social_posts.update_one({"id": post["id"], "user_id": user_id}, {"$set": {
+        "status": status_value,
+        "approved_at": now,
+        "updated_at": now,
+    }})
+    await log_activity(user_id, "marketing", activity, "social")
+
+
+@api.get("/social/accounts")
+async def list_social_accounts(user: dict = Depends(current_user)):
+    existing = await db.social_accounts.find({"user_id": user["id"]}, {"_id": 0}).sort("created_at", -1).to_list(50)
+    by_platform = {a["platform"]: a for a in existing}
+    out = []
+    for platform, label in SOCIAL_PLATFORM_LABELS.items():
+        rec = by_platform.get(platform)
+        out.append({
+            "platform": platform,
+            "label": label,
+            "configured": bool(rec),
+            "status": rec.get("status", "not_connected") if rec else "not_connected",
+            "profile_name": rec.get("profile_name") if rec else "",
+            "profile_handle": rec.get("profile_handle") if rec else "",
+            "profile_url": rec.get("profile_url") if rec else "",
+            "oauth_ready": _social_accounts_env_live(platform),
+            "updated_at": rec.get("updated_at") if rec else None,
+        })
+    return out
+
+
+@api.post("/social/accounts")
+async def connect_social_account(body: SocialAccountIn, user: dict = Depends(current_user)):
+    now = datetime.now(timezone.utc)
+    doc = {
+        "user_id": user["id"],
+        "platform": body.platform,
+        "label": SOCIAL_PLATFORM_LABELS[body.platform],
+        "profile_name": body.profile_name,
+        "profile_handle": body.profile_handle,
+        "profile_url": body.profile_url,
+        "status": "connected_manual",
+        "configured_at": now,
+        "updated_at": now,
+    }
+    await db.social_accounts.update_one(
+        {"user_id": user["id"], "platform": body.platform},
+        {"$set": doc, "$setOnInsert": {"id": str(uuid.uuid4()), "created_at": now}},
+        upsert=True,
+    )
+    await log_activity(user["id"], "marketing", f"{SOCIAL_PLATFORM_LABELS[body.platform]} profile added to Harshita panel", "social")
+    return {**doc, "configured": True}
+
+
+@api.delete("/social/accounts/{platform}")
+async def disconnect_social_account(platform: str, user: dict = Depends(current_user)):
+    if platform not in SOCIAL_PLATFORM_LABELS:
+        raise HTTPException(404, "Unknown social platform")
+    await db.social_accounts.delete_one({"user_id": user["id"], "platform": platform})
+    await log_activity(user["id"], "marketing", f"{SOCIAL_PLATFORM_LABELS[platform]} disconnected from Harshita panel", "social")
+    return {"ok": True}
+
+
+@api.get("/social/posts")
+async def list_social_posts(user: dict = Depends(current_user)):
+    posts = await db.social_posts.find({"user_id": user["id"]}, {"_id": 0}).sort("created_at", -1).to_list(100)
+    return posts
+
+
+@api.post("/social/drafts")
+async def create_social_draft(body: SocialDraftIn, user: dict = Depends(current_user)):
+    platforms = body.platforms or ["instagram", "facebook", "linkedin"]
+    platforms = list(dict.fromkeys(platforms))
+    invalid = [p for p in platforms if p not in SOCIAL_PLATFORM_LABELS]
+    if invalid:
+        raise HTTPException(400, f"Unsupported platform(s): {', '.join(invalid)}")
+
+    now = datetime.now(timezone.utc)
+    pack = await _generate_social_pack(body.objective, platforms)
+    post_id = str(uuid.uuid4())
+    post = {
+        "id": post_id,
+        "user_id": user["id"],
+        "agent_id": "marketing",
+        "campaign_name": body.campaign_name,
+        "objective": body.objective,
+        "platforms": platforms,
+        "status": "waiting_approval" if body.requires_approval else "draft",
+        "summary": pack.get("summary", ""),
+        "asset_brief": pack.get("asset_brief", ""),
+        "per_platform": pack.get("per_platform", {}),
+        "scheduled_at": body.scheduled_at,
+        "created_at": now,
+        "updated_at": now,
+    }
+    await db.social_posts.insert_one(post)
+
+    if body.requires_approval:
+        preview_lines = [
+            f"{SOCIAL_PLATFORM_LABELS[p]}: {(post['per_platform'].get(p, {}).get('caption') or '')[:220]}"
+            for p in platforms
+        ]
+        appr = {
+            "id": str(uuid.uuid4()),
+            "user_id": user["id"],
+            "task_id": post_id,
+            "agent_id": "marketing",
+            "action": f"Approve social campaign: {body.campaign_name}",
+            "impact": "Harshita will schedule or prepare approved posts for connected social profiles. No automatic posting happens without live platform OAuth.",
+            "payload_preview": "\n\n".join(preview_lines),
+            "status": "pending",
+            "created_at": now,
+        }
+        await db.approvals.insert_one(appr)
+    await log_activity(user["id"], "marketing", f"Harshita prepared social draft: {body.campaign_name}", "social")
+    post.pop("_id", None)
+    return post
+
+
+@api.post("/social/publish")
+async def publish_social_post(body: SocialPublishIn, user: dict = Depends(current_user)):
+    post = await db.social_posts.find_one({"id": body.post_id, "user_id": user["id"]}, {"_id": 0})
+    if not post:
+        raise HTTPException(404, "Social post not found")
+    await _approve_social_post(user["id"], post)
+    updated = await db.social_posts.find_one({"id": body.post_id, "user_id": user["id"]}, {"_id": 0})
+    return updated
 
 
 # ============================================================
